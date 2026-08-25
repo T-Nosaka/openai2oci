@@ -1,0 +1,14 @@
+# Visual Studio directories
+.vs/
+
+# Build outputs
+openai2oci/bin/
+openai2oci/obj/
+
+# IDE cache and settings
+.vscode/
+*.suo
+
+# User-specific files
+*.user
+

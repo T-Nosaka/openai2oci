@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "openai2oci": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "http://localhost:11434",
+      "hotReloadEnabled": false
+    }
+  }
+}
