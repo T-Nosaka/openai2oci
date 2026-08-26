@@ -41,7 +41,10 @@ public record OpenAIToolCallFunction(string Name, string Arguments);
 
 public record OpenAIModel(string Id)
 {
+    [property: JsonPropertyName("object")]
     public string Object { get; init; } = "model";
+
+    [property: JsonPropertyName("owned_by")]
     public string OwnedBy { get; init; } = "oci";
 }
 
