@@ -138,6 +138,15 @@ public static class OpenAIEndpoints
                 }
             }
 
+            // OCIレスポンスのUsageをOpenAI形式にマッピング(設計書13章 T-3)。
+            // OCI側が値を返さない場合はnull-合体で0にフォールバックする。
+            var usage = new
+            {
+                prompt_tokens = genericResponse?.Usage?.PromptTokens ?? 0,
+                completion_tokens = genericResponse?.Usage?.CompletionTokens ?? 0,
+                total_tokens = genericResponse?.Usage?.TotalTokens ?? 0
+            };
+
             return Results.Ok(new
             {
                 id = $"chatcmpl-{Guid.NewGuid():N}",
@@ -145,7 +154,7 @@ public static class OpenAIEndpoints
                 created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                 model = body.Model,
                 choices,
-                usage = new { prompt_tokens = 0, completion_tokens = 0, total_tokens = 0 }
+                usage
             });
         });
     }
