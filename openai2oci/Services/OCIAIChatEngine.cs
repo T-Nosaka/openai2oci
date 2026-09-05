@@ -93,4 +93,39 @@ public class OCIAIChatEngine
 
         return await ociClient.Chat(chatRequest);
     }
+
+    /// <summary>
+    /// OCI EmbedText を呼び出す(Cohere Embed 4 想定)。
+    /// 入力はテキストのみ(最大96件)。dimensions は embed-v4 のみ有効(256/512/1024/1536)。
+    /// </summary>
+    public async Task<EmbedTextResponse> EmbedAsync(
+        string authProfileId,
+        string modelId,
+        List<string> inputs,
+        int? dimensions = null,
+        CancellationToken ct = default)
+    {
+        var (ociClient, compartmentId) = _registry.Get(authProfileId);
+
+        var embedDetails = new EmbedTextDetails
+        {
+            CompartmentId = compartmentId,
+            ServingMode = new OnDemandServingMode { ModelId = modelId },
+            Inputs = inputs
+        };
+
+        // Cohere Embed v4 のみ dimensions が有効。指定があれば設定。
+        if (dimensions.HasValue)
+        {
+            embedDetails.OutputDimensions = dimensions.Value;
+        }
+
+        var embedRequest = new EmbedTextRequest { EmbedTextDetails = embedDetails };
+
+        _logger?.LogInformation(
+            "OCI Embed: authProfile={AuthProfile}, model={Model}, inputs={Count}, dimensions={Dimensions}",
+            authProfileId, modelId, inputs.Count, dimensions);
+
+        return await ociClient.EmbedText(embedRequest);
+    }
 }

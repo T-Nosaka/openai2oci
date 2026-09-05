@@ -15,11 +15,173 @@ public static class OpenAIEndpoints
 {
     public static void MapOpenAIEndpoints(this IEndpointRouteBuilder endpoints, AppSetinfo setinfo)
     {
-        // --- GET /v1/models (設計書 4.1: 案A 固定リスト。appsettings.json の OpenAI2Oci:Models から生成) ---
+        // --- GET /v1/models (設計書 4.1: 案A 固定リスト。appsettings.json の OpenAI2Oci:Models + EmbeddingModels から生成) ---
         endpoints.MapGet("/v1/models", () =>
         {
-            var data = setinfo.Models.Select(m => new OpenAIModel(m.Id));
+            var chatModels = setinfo.Models.Select(m => new OpenAIModel(m.Id));
+            var embedModels = setinfo.EmbeddingModels.Select(m => new OpenAIModel(m.Id));
+            var data = chatModels.Concat(embedModels);
             return Results.Ok(new OpenAIModelList(data));
+        });
+
+        // --- POST /v1/embeddings (OpenAI互換: Cohere Embed 4 想定) ---
+        endpoints.MapPost("/v1/embeddings", async (HttpContext ctx, OCIAIChatEngine engine) =>
+        {
+            CreateEmbeddingRequest? body;
+            try
+            {
+                body = await ctx.Request.ReadFromJsonAsync<CreateEmbeddingRequest>();
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new
+                {
+                    error = new { type = "invalid_request_error", message = $"Malformed JSON body: {ex.Message}" }
+                });
+            }
+
+            if (body is null || string.IsNullOrEmpty(body.Model))
+            {
+                return Results.BadRequest(new
+                {
+                    error = new { type = "invalid_request_error", message = "Missing 'model' field." }
+                });
+            }
+
+            if (body.Input.ValueKind == JsonValueKind.Undefined || body.Input.ValueKind == JsonValueKind.Null)
+            {
+                return Results.BadRequest(new
+                {
+                    error = new { type = "invalid_request_error", message = "Missing 'input' field." }
+                });
+            }
+
+            var embeddingModel = setinfo.FindEmbeddingModel(body.Model);
+            if (embeddingModel is null)
+            {
+                return Results.NotFound(new
+                {
+                    error = new
+                    {
+                        type = "invalid_request_error",
+                        message = $"Model '{body.Model}' is not configured. " +
+                                  "Add it to OpenAI2Oci:EmbeddingModels in appsettings.json."
+                    }
+                });
+            }
+
+            // input 正規化: string | string[] のみ対応(数値配列は OCI 非対応)
+            List<string> inputs;
+            try
+            {
+                inputs = ParseEmbeddingInput(body.Input);
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new
+                {
+                    error = new { type = "invalid_request_error", message = ex.Message }
+                });
+            }
+
+            if (inputs.Count == 0)
+            {
+                return Results.BadRequest(new
+                {
+                    error = new { type = "invalid_request_error", message = "'input' must not be empty." }
+                });
+            }
+
+            // encoding_format 検証
+            var encodingFormat = body.EncodingFormat ?? "float";
+            if (encodingFormat != "float" && encodingFormat != "base64")
+            {
+                return Results.BadRequest(new
+                {
+                    error = new { type = "invalid_request_error", message = $"Unsupported encoding_format '{encodingFormat}'. Use 'float' or 'base64'." }
+                });
+            }
+
+            // dimensions 検証(Cohere Embed v4: 256/512/1024/1536)
+            int? dimensions = body.Dimensions;
+            if (dimensions.HasValue && dimensions.Value != 256 && dimensions.Value != 512 && dimensions.Value != 1024 && dimensions.Value != 1536)
+            {
+                return Results.BadRequest(new
+                {
+                    error = new { type = "invalid_request_error", message = $"Unsupported dimensions '{dimensions}'. Supported: 256, 512, 1024, 1536 (Cohere Embed v4)." }
+                });
+            }
+
+            EmbedTextResponse ociResponse;
+            try
+            {
+                ociResponse = await engine.EmbedAsync(
+                    embeddingModel.AuthProfileId, body.Model, inputs, dimensions);
+            }
+            catch (Exception ex)
+            {
+                return Results.Json(
+                    new
+                    {
+                        error = new
+                        {
+                            type = "invalid_request_error",
+                            message = $"OCI Embed error: {ex.Message}"
+                        }
+                    },
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+
+            var embeddings = ociResponse.EmbedTextResult?.Embeddings;
+            if (embeddings is null)
+            {
+                return Results.Json(
+                    new
+                    {
+                        error = new { type = "server_error", message = "OCI returned no embeddings." }
+                    },
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+
+            var data = new List<object>();
+            for (int i = 0; i < embeddings.Count; i++)
+            {
+                object embeddingValue;
+                if (encodingFormat == "base64")
+                {
+                    // float[] -> little-endian bytes -> base64(OpenAI互換)
+                    var floats = embeddings[i];
+                    var bytes = new byte[floats.Count * 4];
+                    for (int j = 0; j < floats.Count; j++)
+                    {
+                        var fb = BitConverter.GetBytes(floats[j]);
+                        Buffer.BlockCopy(fb, 0, bytes, j * 4, 4);
+                    }
+                    embeddingValue = Convert.ToBase64String(bytes);
+                }
+                else
+                {
+                    embeddingValue = embeddings[i];
+                }
+
+                data.Add(new
+                {
+                    @object = "embedding",
+                    index = i,
+                    embedding = embeddingValue
+                });
+            }
+
+            // OCI は usage を返さないため 0 埋め(OpenAI互換形のみ維持)
+            var usage = new { prompt_tokens = 0, total_tokens = 0 };
+
+            return Results.Ok(new
+            {
+                @object = "list",
+                data,
+                model = body.Model,
+                usage
+            });
         });
 
         // --- POST /v1/chat/completions (設計書 4.2 / 6章 / 7章) ---
@@ -222,4 +384,48 @@ public static class OpenAIEndpoints
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
+
+    /// <summary>
+    /// OpenAI embeddings の input (string | string[] | number[] | number[][]) を List&lt;string&gt; に正規化。
+    /// 現状 OCI はテキストのみサポートのため string / string[] のみ受け付ける。
+    /// 数値配列が来た場合は 400 扱いとする。
+    /// </summary>
+    private static List<string> ParseEmbeddingInput(JsonElement input)
+    {
+        switch (input.ValueKind)
+        {
+            case JsonValueKind.String:
+                var s = input.GetString();
+                return string.IsNullOrEmpty(s) ? new List<string>() : new List<string> { s };
+
+            case JsonValueKind.Array:
+                var list = new List<string>();
+                foreach (var el in input.EnumerateArray())
+                {
+                    switch (el.ValueKind)
+                    {
+                        case JsonValueKind.String:
+                            var str = el.GetString();
+                            if (!string.IsNullOrEmpty(str))
+                            {
+                                list.Add(str);
+                            }
+                            break;
+                        case JsonValueKind.Number:
+                            throw new ArgumentException("Numeric token input is not supported for OCI embeddings. Use string or array of strings.");
+                        case JsonValueKind.Array:
+                            throw new ArgumentException("Nested array input is not supported for OCI embeddings.");
+                        default:
+                            throw new ArgumentException($"Unsupported input element type: {el.ValueKind}");
+                    }
+                }
+                return list;
+
+            case JsonValueKind.Number:
+                throw new ArgumentException("Numeric input is not supported for OCI embeddings.");
+
+            default:
+                throw new ArgumentException($"Unsupported input type: {input.ValueKind}");
+        }
+    }
 }

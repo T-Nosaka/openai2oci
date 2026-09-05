@@ -18,9 +18,16 @@ public class AppSetinfo
     /// <summary>/v1/models で公開するモデルとその既定パラメータの一覧</summary>
     public List<ModelSetting> Models { get; set; } = new();
 
+    /// <summary>/v1/embeddings で公開する Embedding モデル一覧(Cohere Embed 4 想定)。チャット用 Models とは分離。</summary>
+    public List<EmbeddingModelSetting> EmbeddingModels { get; set; } = new();
+
     /// <summary>指定モデルIDの設定を取得(未登録なら null)</summary>
     public ModelSetting? FindModel(string modelId) =>
         Models.FirstOrDefault(m => m.Id == modelId);
+
+    /// <summary>指定 Embedding モデルIDの設定を取得(未登録なら null)</summary>
+    public EmbeddingModelSetting? FindEmbeddingModel(string modelId) =>
+        EmbeddingModels.FirstOrDefault(m => m.Id == modelId);
 
     /// <summary>指定IDのOCI認証プロファイルを取得(未登録なら null)</summary>
     public OciAuthProfile? FindAuthProfile(string authProfileId) =>
@@ -67,4 +74,17 @@ public class ModelSetting
 
     /// <summary>既定のtop_k(OpenAI標準には無いためリクエスト拡張フィールドが優先されない限りこれを使用)</summary>
     public int? TopK { get; set; } = 1;
+}
+
+/// <summary>
+/// Embedding モデルごとの設定。Cohere Embed 4 をターゲットに分離。
+/// チャット用 ModelSetting とは独立して管理する。
+/// </summary>
+public class EmbeddingModelSetting
+{
+    /// <summary>OCIモデルID(例: "cohere.embed-multilingual-v3.0", "cohere.embed-v4.0")</summary>
+    public string Id { get; set; } = "";
+
+    /// <summary>使用するOCI認証プロファイルのID(AppSetinfo.OciAuthProfiles[].Id を参照)</summary>
+    public string AuthProfileId { get; set; } = "";
 }

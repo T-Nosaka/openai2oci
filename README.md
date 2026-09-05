@@ -1,9 +1,9 @@
 # OCI Generative AI 向け OpenAI互換プロキシサーバー 仕様書
 
-- バージョン: 1.0 (Specification)
+- バージョン: 1.1 (Specification)
 - 作成日: 2026-08-24
-- 更新日: 2026-08-25(仕様書化:旧 Draft を実装同期済の仕様へ全面改訂、Cohere 関連を全削除)
-- ステータス: 全機能実装済み・opencode で動作確認済(ストリーミング・Function Calling・マルチモーダル)
+- 更新日: 2026-09-06(Embeddings 対応: Cohere Embed v4 追加, 1〜15章を実装同期)
+- ステータス: 全機能実装済み・opencode で動作確認済(ストリーミング・Function Calling・マルチモーダル・Embeddings)
 
 > 本書は旧版(Draft)からの仕様確定版です。1〜13章は実装済み項目を**仕様**として記述しています。検討中・未実装の項目は各章の「制約」/「TODO」節、または 13章「オープン事項(残存課題)」を参照してください。実装メモ・決定履歴は 15章「実装メモ」を参照してください。
 
@@ -19,23 +19,24 @@ OCI Generative AI サービスは独自のリクエスト/レスポンス形式�
 |---|---|
 | モデル一覧APIが無い | OCI公式OpenAI互換エンドポイントには `/v1/models` に相当するものが提供されておらず、モデル自動検出を行うクライアント（opencode等）が起動時に失敗する |
 | サードパーティゲートウェイの限界 | LiteLLM等の汎用ゲートウェイを検証したが、マルチモーダル非対応、一部モデルで動作しない、モデル固有の詳細パラメータ（reasoning_effort, safety_mode等）を渡せない、という制約があった |
-| モデルファミリーごとの非互換性 | OCIは内部的に `GenericChatRequest`（Llama/xAI/OpenAI/xAI/Google系）を使用。`CohereChatRequest` 系は本プロキシのスコープ外(`cohere.*` モデル ID を登録してもOCIがエラーを返すため設定してはならない) |
+| モデルファミリーごとの非互換性 | OCIは内部的に `GenericChatRequest`（Llama/xAI/OpenAI/xAI/Google系）を使用。Chat 用 `CohereChatRequest` 系は本プロキシのスコープ外(`cohere.*` チャットモデル ID を登録してもOCIがエラーを返すため設定してはならない)。Embedding は `cohere.embed-v4.0` 等が別系統(`EmbedText`)で提供される |
 
 ### 1.2 目的
 
-OCI Generative AIをバックエンドとし、OpenAI Chat Completions API互換のインターフェースを提供する **自前制御のプロキシサーバー** を構築する。これにより：
+OCI Generative AIをバックエンドとし、OpenAI Chat Completions / Embeddings API互換のインターフェースを提供する **自前制御のプロキシサーバー** を構築する。これにより：
 
 - opencode等、OpenAI互換クライアントからOCIのモデルを問題なく利用できるようにする
 - マルチモーダル（画像等）入力に対応する
 - モデルごとの細かいパラメータ制御を可能にする
 - ツール呼び出し（Function Calling）を正しく往復させる
-- 将来的にストリーミング応答にも対応する
+- ストリーミング応答に対応する
+- Embedding（Cohere Embed v4）に対応する
 
 ### 1.3 非目的（スコープ外・将来検討）
 
 - OCIのResponses API / Conversations API（ステートフルAPI）への対応（初期版はChat Completions相当のステートレスAPIのみ）
-- Embeddings / Rerank API
-- Files / Vector Stores / Containers 等のエージェント基盤API
+- Rerank API
+- Files / Vector Stores / Containers 等のエージェント基盤API（Embeddings は `cohere.embed-v4.0` を対象に実装済み。vector_stores は不要）
 - 複数テナント/複数ユーザーでの認証多重化（初期版はシングルユーザー・個人利用を想定）
 
 ---
@@ -105,14 +106,15 @@ REST直叩きは将来真のトークンストリーミングが必要になっ�
 
 ### 3.2 モデルファミリー判定ロジック
 
-**全モデル `GenericChatRequest` 固定**。`CohereChatRequest` 系は本プロキシのスコープ外。
+**Chat は `GenericChatRequest` 固定、Embedding は `EmbedText` 固定**。`CohereChatRequest` 系は本プロキシのスコープ外。
 
-| モデルID prefix | 使用するOCIリクエスト形式 |
-|---|---|
-| `meta.*`, `openai.*`, `xai.*`, `google.*` | `GenericChatRequest` |
-| `cohere.*` | **スコープ外**(登録してもOCIがエラーを返す) |
+| 用途 | モデルID prefix | 使用するOCIリクエスト形式 |
+|---|---|---|
+| Chat | `meta.*`, `openai.*`, `xai.*`, `google.*` | `GenericChatRequest` |
+| Chat | `cohere.*` (Chat) | **スコープ外**(登録してもOCIがエラーを返す) |
+| Embedding | `cohere.embed-*` (例: `cohere.embed-v4.0`) | `EmbedText` (`EmbedTextDetails`) |
 
-新モデル追加時も常に `GenericChatRequest` を使うため、判定テーブルは不要。将来 `CohereChatRequest` 系を対応する場合は明示的に分岐を追加する。
+Chat の新モデル追加時も常に `GenericChatRequest` を使うため、判定テーブルは不要。Embedding は `EmbeddingModels` 配列で分離管理する(10章)。将来 `CohereChatRequest` 系を対応する場合は明示的に分岐を追加する。
 
 ---
 
@@ -135,13 +137,15 @@ REST直叩きは将来真のトークンストリーミングが必要になっ�
 }
 ```
 
-**データソース**: `appsettings.json` の `OpenAI2Oci:Models` 配列(固定リスト案A)。
+**データソース**: `appsettings.json` の `OpenAI2Oci:Models` 配列 + `OpenAI2Oci:EmbeddingModels` 配列(固定リスト案A)。
 
-- 各エントリは `ModelSetting` 構造体(`Id` / `AuthProfileId` / `MaxTokens` / `Temperature` / `TopP` / `TopK`)で、`IConfiguration.GetSection().Bind()` で読み込み
-- `Id` のみが `/v1/models` 返却値に使用される。残りは `chat/completions` の既定値として使われる
-- 起動時に `OpenAI2Oci:OciAuthProfiles` と `Models[].AuthProfileId` の整合性チェック(fail-fast)
+- `Models` の各エントリは `ModelSetting` 構造体(`Id` / `AuthProfileId` / `MaxTokens` / `Temperature` / `TopP` / `TopK`)で、`IConfiguration.GetSection().Bind()` で読み込み
+- `EmbeddingModels` の各エントリは `EmbeddingModelSetting` 構造体(`Id` / `AuthProfileId`)で、同様にバインド。Cohere Embed v4 をターゲットに `Models` とは明確に分離する
+- `Id` のみが `/v1/models` 返却値に使用される。`Models` の残りフィールドは `chat/completions` の既定値として使われる
+- 起動時に `OpenAI2Oci:OciAuthProfiles` と `Models[].AuthProfileId` / `EmbeddingModels[].AuthProfileId` の整合性チェック(fail-fast)
+- レスポンスは `Models` と `EmbeddingModels` を連結して返却する(例: `openai.gpt-oss-120b` + `cohere.embed-v4.0`)
 
-> 注: Cohere 系モデル (`cohere.*`) は本プロキシのスコープ外(3.2節)。`Models` に含めないこと。
+> 注: Cohere Chat 系モデル (`cohere.*`) は本プロキシのスコープ外(3.2節)。`Models` に含めないこと。Embedding は `EmbeddingModels` に登録する。
 
 ### 4.2 `POST /v1/chat/completions`
 
@@ -164,6 +168,36 @@ REST直叩きは将来真のトークンストリーミングが必要になっ�
 | メッセージ内 `image_url` | ○ | 8章マルチモーダル |
 
 **OCI固有拡張パラメータの透過方針**: `top_k` のみ対応。他は将来 `extra_body` 等で透過する設計余地あり。
+
+### 4.3 `POST /v1/embeddings`
+
+**対応パラメータ(OpenAI準拠)**:
+
+| OpenAIパラメータ | 対応 | 備考 |
+|---|---|---|
+| `model` | ○ | `appsettings.json` の `EmbeddingModels[].Id` と完全一致必須(不一致は 404) |
+| `input` | ○ | `string` または `string[]`。数値配列は OCI 非対応のため 400。最大96件・各512token(超過は OCI が `INVALID_ARGUMENT`、プロキシは 502 でラップ) |
+| `encoding_format` | ○ | `float` (既定) / `base64`。`base64` は `float[]→little-endian bytes→Base64` に変換して返却 |
+| `dimensions` | ○ | `256` / `512` / `1024` / `1536` のみ(Cohere Embed v4 の Matryoshka 対応)。未指定は OCI 既定値(≈1024)。v3 系では未対応のため指定時は 400 |
+| `user` | △ | 受信するが OCI には渡さない |
+
+**OCI 呼び出し**: `OCIAIChatEngine.EmbedAsync` → `GenerativeAiInferenceClient.EmbedText(EmbedTextDetails{CompartmentId, ServingMode, Inputs, OutputDimensions})`。`input` は `Inputs: List<string>` に正規化、画像入力(`EmbedContents`)は当面未対応。
+
+**レスポンス(OpenAI互換形式)**:
+
+```json
+{
+  "object": "list",
+  "data": [
+    { "object": "embedding", "index": 0, "embedding": [0.01, -0.02, ...] }
+  ],
+  "model": "cohere.embed-v4.0",
+  "usage": { "prompt_tokens": 0, "total_tokens": 0 }
+}
+```
+
+- `usage` は OCI `EmbedTextResult` がトークン数を返さないため `0` 埋め。
+- 認証は `POST /v1/chat/completions` と同一(5章)。
 
 ---
 
@@ -236,9 +270,15 @@ OCI Generative AI の `ImageContent` は `Gemini` / `Grok` 等の対応モデル
 | `messages` 欠落 | 400 | 同上 `"Missing 'messages' field."` |
 | `model` 未登録 | 404 | `"Model 'xxx' is not configured. Add it to OpenAI2Oci:Models..."` |
 | `role:"tool"` で `tool_call_id` 欠落 | 400 | `"tool message requires tool_call_id"` |
+| `input` 欠落/空 | 400 | `"Missing 'input' field."` / `"'input' must not be empty."` |
+| `input` が数値配列 | 400 | `"Numeric token input is not supported..."` |
+| `encoding_format` 不正 | 400 | `"Unsupported encoding_format 'xxx'. Use 'float' or 'base64'."` |
+| `dimensions` 不正 | 400 | `"Unsupported dimensions 'xxx'. Supported: 256, 512, 1024, 1536..."` |
+| `model` 未登録(Embedding) | 404 | `"Model 'xxx' is not configured. Add it to OpenAI2Oci:EmbeddingModels..."` |
 | 起動時バリデーション失敗(fail-fast) | 起動しない | `InvalidOperationException` を例外送出 |
 | 認証ミドルウェアでの Bearer 不一致 | 401 | `"Invalid or missing API key."` |
 | OCI Chat 例外 | 502 | `"OCI Chat error: <OCI例外メッセージ>"` |
+| OCI Embed 例外 / 空レスポンス | 502 | `"OCI Embed error: ..."` / `"OCI returned no embeddings."` |
 
 OCI 側エラー(401/403/429/5xx)は基本的に透過せず `502 + OCI例外メッセージ` でラップ(OCI 固有エラー構造を OpenAI 形式に正規化していないため)。
 
@@ -253,10 +293,11 @@ OCI 側エラー(401/403/429/5xx)は基本的に透過せず `502 + OCI例外メ
 | OCI 認証プロファイル配列 | `OciAuthProfiles[].{Id, OciConfigProfile, OciCompartmentId}` | `appsettings.json` `OpenAI2Oci` セクション(15.3節) |
 | プロキシ公開用APIキー | `""`(認証なし) / `"sk-..."` | `appsettings.json`(`OpenAI2Oci:ProxyApiKey`)。本番では環境変数 / `dotnet user-secrets` で上書き推奨 |
 | 対応モデル一覧 | `Models[].{Id, AuthProfileId, MaxTokens, Temperature, TopP, TopK}` | `appsettings.json`(`OpenAI2Oci:Models`)。各エントリは `OciAuthProfiles` の `Id` を参照 |
+| Embedding モデル一覧 | `EmbeddingModels[].{Id, AuthProfileId}` | `appsettings.json`(`OpenAI2Oci:EmbeddingModels`)。Cohere Embed v4 用。`Models` とは分離管理 |
 | Kestrel バインド URL | `http://127.0.0.1:11434` | `appsettings.json` `Kestrel.Endpoints.Http.Url` |
 | ログレベル | `Information` | `appsettings.json` `Logging.LogLevel` |
 
-起動時に `OciAuthProfiles` と `Models[].AuthProfileId` の整合性をチェックし、不整合は `InvalidOperationException` で fail-fast。
+起動時に `OciAuthProfiles` と `Models[].AuthProfileId` / `EmbeddingModels[].AuthProfileId` の整合性をチェックし、不整合は `InvalidOperationException` で fail-fast。
 
 ---
 
@@ -264,7 +305,7 @@ OCI 側エラー(401/403/429/5xx)は基本的に透過せず `502 + OCI例外メ
 
 `Microsoft.Extensions.Logging` を用いて以下を記録(ASP.NET Core 標準):
 
-- リクエスト受信時のモデル名(authProfileId、メッセージ数、tools 数)
+- リクエスト受信時のモデル名(authProfileId、メッセージ数、tools 数) / Embedding 時の入力件数・次元数
 - ツール呼び出しの名前・引数・結果概要
 - OCI 呼び出しのレイテンシ・エラー
 - 個人情報・APIキー等の秘匿情報はログに出力しない
@@ -288,15 +329,17 @@ OCI 側エラー(401/403/429/5xx)は基本的に透過せず `502 + OCI例外メ
 |---|---|---|---|
 | T-1 | 真のトークン單位ストリーミング | **未対応** | UX 上は一括表示。OCI SDK の `IsStream=true` サポートが公式に確認でき次第対応(7.2節) |
 | T-2 | `tool_choice` パラメータのOCI への透過 | **受信のみ・OCI未送信** | OCI 既定動作で動作するが、`required` / 特定関数指定等の明示は反映されない |
-| T-3 | `usage` 統計(prompt_tokens / completion_tokens) | **常に 0** | クライアント側の usage 表示が機能しない。OCI 応答 `ChatResult.ChatResponse.Usage` から取得可能だが未実装 |
+| T-3 | `usage` 統計(prompt_tokens / completion_tokens) | **対応済(Chat) / Embeddingは常に0** | Chat は `GenericChatResponse.Usage` からマッピング済(2026-08-26)。Embedding は OCI `EmbedTextResult` がトークン数を返さないため `0` 埋め |
 | T-4 | `response_format`(JSON Schema 構造化出力) | **未対応** | クライアントからの `response_format` フィールドは無視される |
 | T-5 | 音声/動画/PDF マルチモーダル | **未対応** | 画像のみ対応(8章)。OCI モデル側のサポート状況に応じて順次対応 |
+| T-6 | Embeddings 画像入力(`EmbedContents`) | **未対応** | Cohere Embed v4 は画像混在入力に対応するが、当面テキストのみ。必要時に `EmbedContents` 対応を追加 |
 
 **スコープ外(対応しないことを確定)**:
 
-- `CohereChatRequest` 系モデル: 3.2節にて `cohere.*` は本プロキシのスコープ外と決定。`Models` への登録も禁止。
+- `CohereChatRequest` 系モデル: 3.2節にて `cohere.*` Chat モデルは本プロキシのスコープ外と決定。`Models` への登録も禁止。Embedding は `EmbeddingModels` で別管理。
 - 認証の OCI Bearer 化: 現状は OCI 署名認証のみ。
 - `Cohere` 系以外で今後分岐が必要になったモデルファミリー: 必要時に 3.2節の判定ロジックを再導入。
+- `vector_stores` / Rerank: 対応しない。
 
 ---
 
@@ -317,21 +360,21 @@ OCI 側エラー(401/403/429/5xx)は基本的に透過せず `502 + OCI例外メ
 
 ```
 openai2oci/
-├── AppSetinfo.cs                       (アプリ設定データクラス)
-├── Program.cs                          (エントリポイント: 約50行)
+├── AppSetinfo.cs                       (アプリ設定データクラス: Models / EmbeddingModels 分離)
+├── Program.cs                          (エントリポイント: 約70行)
 ├── Endpoints/
-│   └── OpenAIEndpoints.cs              (/v1/models, /v1/chat/completions + SSE)
+│   └── OpenAIEndpoints.cs              (/v1/models, /v1/chat/completions + SSE, /v1/embeddings)
 ├── Middleware/
 │   └── AuthMiddleware.cs               (Bearer API キー認証)
 ├── Converters/
 │   ├── OpenAIToOciConverter.cs         (OpenAI → OCI: messages, tools, tool role)
 │   └── OciToOpenAIConverter.cs         (OCI → OpenAI: text / tool_calls, ID 補完)
 ├── Models/
-│   └── OpenAIDtos.cs                   (リクエスト/レスポンス record)
+│   └── OpenAIDtos.cs                   (リクエスト/レスポンス record: Chat + Embeddings)
 ├── Services/
-│   ├── OCIAIChatEngine.cs              (OCI SDK ラッパ、tool 実行ループは持たない)
-│   └── OciClientExtensions.cs          (DI 登録拡張メソッド)
-└── appsettings.json                    (Kestrel URL のみ保持)
+│   ├── OCIAIChatEngine.cs              (OCI SDK ラッパ: ChatAsync / EmbedAsync)
+│   └── OciClientExtensions.cs          (DI 登録拡張メソッド: OciClientRegistry)
+└── appsettings.json                    (Kestrel URL + OpenAI2Oci 設定)
 ```
 
 ### 15.2 採用した実装方針
@@ -339,8 +382,8 @@ openai2oci/
 | 設計書項目 | 決定 |
 |---|---|
 | 3.1 OCI呼び出し方式 | **OCI公式SDK** を採用（`OCI.DotNetSDK.Generativeaiinference 135.0.0`）。既存資産 `ocitest1` との整合性重視。Beraer 形式への切替は将来課題として残置。 |
-| 3.2 モデルファミリー判定 | **`GenericChatRequest` 固定**(`CohereChatRequest` は対応外、3.2節)。分岐ロジックは導入しない。 |
-| 4.1 モデル一覧データソース | **案A（固定リスト）**。`appsettings.json` の `OpenAI2Oci:Models` から生成。`ContentRootPath = AppContext.BaseDirectory` で VS 起動時の読み込み問題を回避。 |
+| 3.2 モデルファミリー判定 | **Chat: `GenericChatRequest` 固定 / Embedding: `EmbedText` 固定**。`CohereChatRequest` は対応外、`cohere.embed-*` は `EmbeddingModels` で分離。 |
+| 4.1 モデル一覧データソース | **案A（固定リスト）**。`appsettings.json` の `OpenAI2Oci:Models` + `EmbeddingModels` から生成。`ContentRootPath = AppContext.BaseDirectory` で VS 起動時の読み込み問題を回避。 |
 | 5章 認証（プロキシ→OCI） | `ConfigFileAuthenticationDetailsProvider("~/.oci/config", profile)` で **OCI 署名認証** を使用。Bearer 形式には未切替。 |
 | 6章 Function Calling | **プロキシは変換のみ**(A方針)。ツール実行はクライアント(opencode)側。再帰OCI呼び出しループは `OCIAIChatEngine` から削除済み（旧 `processToolCalls` 廃止）。 |
 | 7章 ストリーミング | **Phase 2 暫定版**。OCI 応答を単一 SSE チャンクにまとめて送出。3 チャンク（role → content/tool_calls → finish_reason）+ `data: [DONE]`。真のトークン単位ストリーミングは未対応。`WriteSseAsync` で role/content/tool_calls/finish_reason を個別チャンクで送出後、`Results.Empty` を返す。 |
@@ -390,15 +433,21 @@ openai2oci/
         "TopP": 1,
         "TopK": 1
       }
+    ],
+    "EmbeddingModels": [
+      {
+        "Id": "cohere.embed-v4.0",
+        "AuthProfileId": "defaultjp"
+      }
     ]
   }
 }
 ```
 
 - `ContentRootPath` を `AppContext.BaseDirectory` に固定(VSの"Project"プロファイルで `appsettings.json` が読めない問題を回避)
-- 起動時に `OciAuthProfiles` の `Id` 重複・`OciCompartmentId` 空・`Models[].AuthProfileId` の存在を検証(fail-fast)
-- リクエスト時のパラメータ解決: `body.Temperature ?? modelSetting.Temperature`(リクエスト値優先、無ければ `Models[]` の既定値)
-- **Cohere 系モデル (`cohere.*`) は登録不可**(3.2節・13章)
+- 起動時に `OciAuthProfiles` の `Id` 重複・`OciCompartmentId` 空・`Models[].AuthProfileId` / `EmbeddingModels[].AuthProfileId` の存在を検証(fail-fast)
+- リクエスト時のパラメータ解決(Chat): `body.Temperature ?? modelSetting.Temperature`(リクエスト値優先、無ければ `Models[]` の既定値)。Embedding は `dimensions` をそのまま `OutputDimensions` に透過
+- **Cohere Chat 系モデル (`cohere.*`) は登録不可**(3.2節・13章)。Embedding は `EmbeddingModels` に登録
 
 ### 15.4 snake_case / PascalCase マッピング
 
@@ -419,12 +468,14 @@ OpenAI プロトコルは `tool_call_id` / `tool_calls` のような snake_case 
 | 2026-08-24 | opencode から `POST /v1/chat/completions`(text) 動作確認 |
 | 2026-08-24 | SSE 形式でのチャット応答表示確認(streaming) |
 | 2026-08-24 | ツール呼び出し往復（多段: 7 連続 tool call）動作確認。seleniumsvr 経由で kakaku.com から REGZA 43M550M の価格情報を取得・要約 |
+| 2026-08-26 | `usage` 対応: `GenericChatResponse.Usage` を `prompt_tokens/completion_tokens/total_tokens` にマッピング |
+| 2026-09-06 | Embedding 対応: `POST /v1/embeddings` (Cohere Embed v4) 動作確認。`curl /v1/embeddings` で float 配列・base64・batch・dimensions(1024) を確認。`GET /v1/models` に `cohere.embed-v4.0` が含まれることを確認 |
 
 ### 15.6 既知の制約 / 残 TODO
 
 - **真のトークン単位ストリーミング**: OCI 応答を単一チャンクで送出しているため、UX 上は一括表示。真のストリーミングには OCI SDK の SSE サポート検証が必要。
 - **`tool_choice` パラメータ**: 受信するが OCI には渡していない（OCI 既定動作）。
-- **`usage` 統計**: 常に 0 を返却。OCI 応答の `ChatResult.ChatResponse.Usage` から取得可能だが未実装。
+- **`usage` 統計**: Chat は実装済(`GenericChatResponse.Usage`→OpenAI形式)。Embedding は OCI `EmbedTextResult` がトークン数を返さないため `0` 埋め。
 - **`response_format`**: JSON Schema 構造化出力、未対応。
 - **マルチモーダル入力**: 実装済（`OpenAIToOciConverter.ToOciContents`）。`image_url`(base64/URL + `detail`) → OCI `ImageContent{ImageUrl}` に変換。opencode 側で `attachment: true` + `modalities.input: ["text","image"]` を宣言したモデルでのみ画像添付 UI が有効化される。
 - **マルチモーダル tool 結果**: 設計書 6章の「tool role ではなく user に画像分割」実装済（`ToOciMessages` で ToolMessage(text) + UserMessage(images) に分割）。
@@ -432,6 +483,7 @@ OpenAI プロトコルは `tool_call_id` / `tool_calls` のような snake_case 
 - **Gemini Vertex AI 対応**: `OpenAIToOciConverter` で JSON Schema サニタイズ（`UnsupportedSchemaKeywords`: `$schema`/`exclusiveMinimum` 等22キーワード除去）+ `EnsureTypeField` によるtype自動補完（properties→object / items→array / その他→string）。MCPツール由来のtype省略スキーマ対策。
 - **tool結果が画像のみの場合**: `ToOciMessages` で空TextContentを補完（OCI側の必須項目対策）。
 - **finish_reasonマッピング**: `OciToOpenAIConverter.MapFinishReason` で STOP→stop, LENGTH→length, CONTENT_FILTER→content_filter に正規化。
+- **Embeddings**: 実装済(`POST /v1/embeddings`, Cohere Embed v4)。`input: string|string[]` → `EmbedTextDetails.Inputs`、 `dimensions` → `OutputDimensions` (256/512/1024/1536)、 `encoding_format: float/base64` 対応。画像混在入力(`EmbedContents`)は未対応。`GET /v1/models` は `Models` + `EmbeddingModels` を統合返却。
 
 ### 15.7 モデルごとのマルチモーダル対応状況（2026-08-25 時点）
 
@@ -443,7 +495,7 @@ OpenAI プロトコルは `tool_call_id` / `tool_calls` のような snake_case 
 | `openai.gpt-oss-20b` | **非対応**(text-only) | 宣言不要 |
 | `meta.llama-*-instruct` | **非対応**(text-only) | 宣言不要 |
 
-> 注: Cohere 系モデル (`cohere.*`) は本プロキシのスコープ外(3.2節)のため `Models` に登録しない。表にも掲載しない。
+> 注: Cohere Chat 系モデル (`cohere.*`) は本プロキシのスコープ外(3.2節)のため `Models` に登録しない。Embedding は `cohere.embed-v4.0` 等を `EmbeddingModels` に登録する。表には Chat モデルのみ掲載。
 
 **opencode.jsonc 定義サンプル（抜粋）**:
 

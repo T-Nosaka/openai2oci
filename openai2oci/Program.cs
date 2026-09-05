@@ -55,6 +55,25 @@ foreach (var model in setinfo.Models)
             "OciAuthProfiles が見つかりません。");
     }
 }
+foreach (var model in setinfo.EmbeddingModels)
+{
+    if (string.IsNullOrEmpty(model.Id))
+    {
+        throw new InvalidOperationException(
+            "OpenAI2Oci:EmbeddingModels に Id が空のエントリがあります。");
+    }
+    if (string.IsNullOrEmpty(model.AuthProfileId))
+    {
+        throw new InvalidOperationException(
+            $"OpenAI2Oci:EmbeddingModels['{model.Id}'].AuthProfileId が未設定です。");
+    }
+    if (!authProfileIds.Contains(model.AuthProfileId))
+    {
+        throw new InvalidOperationException(
+            $"OpenAI2Oci:EmbeddingModels['{model.Id}'].AuthProfileId = '{model.AuthProfileId}' に該当する " +
+            "OciAuthProfiles が見つかりません。");
+    }
+}
 
 // OCI Generative AI クライアント登録(OciAuthProfiles 一件ごとにクライアントを生成)
 builder.Services.AddOciClient(setinfo);

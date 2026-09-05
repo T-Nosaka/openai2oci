@@ -52,3 +52,29 @@ public record OpenAIModelList(IEnumerable<OpenAIModel> Data)
 {
     public string Object { get; init; } = "list";
 }
+
+/// <summary>
+/// OpenAI Embeddings API リクエスト DTO。
+/// input は string または string[] (数値配列は OCI 非対応のため 400)。
+/// </summary>
+public record CreateEmbeddingRequest(
+    string? Model,
+    JsonElement Input,
+    [property: JsonPropertyName("encoding_format")] string? EncodingFormat = null,
+    [property: JsonPropertyName("dimensions")] int? Dimensions = null,
+    string? User = null);
+
+public record EmbeddingData(
+    [property: JsonPropertyName("object")] string Object,
+    int Index,
+    object Embedding);
+
+public record EmbeddingUsage(
+    [property: JsonPropertyName("prompt_tokens")] int PromptTokens,
+    [property: JsonPropertyName("total_tokens")] int TotalTokens);
+
+public record CreateEmbeddingResponse(
+    [property: JsonPropertyName("object")] string Object,
+    List<EmbeddingData> Data,
+    string Model,
+    EmbeddingUsage Usage);
