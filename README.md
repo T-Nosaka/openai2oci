@@ -1,8 +1,8 @@
 # OCI Generative AI 向け OpenAI互換プロキシサーバー 仕様書
 
-- バージョン: 1.1 (Specification)
+- バージョン: 1.2 (Specification)
 - 作成日: 2026-08-24
-- 更新日: 2026-09-06(Embeddings 対応: Cohere Embed v4 追加, 1〜15章を実装同期)
+- 更新日: 2026-10-12(真のトークンストリーミング対応: stream 時のみ REST 直叩き, SDK 148.1.0)
 - ステータス: 全機能実装済み・opencode で動作確認済(ストリーミング・Function Calling・マルチモーダル・Embeddings)
 
 > 本書は旧版(Draft)からの仕様確定版です。1〜13章は実装済み項目を**仕様**として記述しています。検討中・未実装の項目は各章の「制約」/「TODO」節、または 13章「オープン事項(残存課題)」を参照してください。実装メモ・決定履歴は 15章「実装メモ」を参照してください。
@@ -83,7 +83,7 @@ OCI Generative AIをバックエンドとし、OpenAI Chat Completions / Embeddi
 |---|---|
 | 言語/フレームワーク | C# / ASP.NET Core Minimal API |
 | ターゲット | .NET 10 |
-| OCI連携 | OCI公式SDK `OCI.DotNetSDK.Generativeaiinference 135.0.0` を採用(3.1節) |
+| OCI連携 | OCI公式SDK `OCI.DotNetSDK.Generativeaiinference 148.1.0` を採用(3.1節)。stream 時のみ REST 直叩き(7章) |
 | 設定管理 | `appsettings.json` の `OpenAI2Oci` セクションに `IConfiguration` 経由でバインド。詳細 10章 / 15.3節 |
 | ロギング | `Microsoft.Extensions.Logging`(ASP.NET Core 標準) |
 
@@ -91,18 +91,17 @@ OCI Generative AIをバックエンドとし、OpenAI Chat Completions / Embeddi
 
 ## 3. 実装方式の決定事項
 
-### 3.1 OCI呼び出し方式：**OCI公式SDK**
+### 3.1 OCI呼び出し方式：**OCI公式SDK + stream 時のみ REST 直叩き**
 
-OCI公式SDK `OCI.DotNetSDK.Generativeaiinference` を採用。
+OCI公式SDK `OCI.DotNetSDK.Generativeaiinference` を採用。ストリーミングのみ REST 直叩きを併用するハイブリッド構成。
 
 | 項目 | 内容 |
 |---|---|
-| 利用パッケージ | `OCI.DotNetSDK.Generativeaiinference 135.0.0`(+ 推移的依存 `OCI.DotNetSDK.Common`) |
+| 利用パッケージ | `OCI.DotNetSDK.Generativeaiinference 148.1.0`(+ 推移的依存 `OCI.DotNetSDK.Common`) |
 | 認証 | `ConfigFileAuthenticationDetailsProvider("~/.oci/config", profile)` で **OCI 署名認証**。Bearer 形式への切替は将来課題。 |
-| ストリーミング | SDK の同期 API のみ使用。OCI SDK の SSE サポートは公式に未確認のため、真のトークン単位ストリーミングは未対応(7.2節)。OCI 応答を単一チャンクにまとめて SSE 送出する方式で実装。 |
+| 非ストリーミング | SDK の同期 API (`GenerativeAiInferenceClient.Chat` / `EmbedText`)を使用 |
+| ストリーミング | SDK の `Chat()` は SSE ストリームのパースに未対応のため、`OciHttpClientHandler.FromConfigFile` による署名付き `HttpClient` で `POST /20231130/actions/chat` (`isStream:true`) を直接呼び、トークン単位で SSE 素通しする(7章)。署名ロジック自体は SDK に委譲し、自前実装しない |
 | 互換性問題 | `GenericChatRequest` の `Temperature` / `TopP` / `FrequencyPenalty` / `PresencePenalty` が非Nullable `double` で常に JSON 出力される問題を、`OptionalGenericChatRequest`(`new` でプロパティ隠し + Newtonsoft `[JsonProperty(NullValueHandling=Ignore)]`)で回避(Grok 等、フィールド存在を許容しないモデルに対応) |
-
-REST直叩きは将来真のトークンストリーミングが必要になった場合に再検討。
 
 ### 3.2 モデルファミリー判定ロジック
 
@@ -229,20 +228,26 @@ Chat の新モデル追加時も常に `GenericChatRequest` を使うため、�
 
 ## 7. ストリーミング対応方針
 
-OCI SDK の SSE サポートが公式に未確認のため、現状は **OCI 応答を単一チャンクにまとめて送出する暫定版** を採用。
+`stream: true` 時は OCI の SSE をトークン単位で素通しする **真のストリーミング** を採用(`OCIAIChatEngine.ChatStreamAsync`)。
 
 ### 7.1 動作
 
 - リクエスト `stream: true` → レスポンス `Content-Type: text/event-stream`
-- チャンク構成(計 3 + 終端):
+- OCI に `POST /20231130/actions/chat` (`isStream:true`, `streamOptions:{isIncludeUsage:true}`)を発行し、SSE イベント(`data:` 行の `ChatResult` / 素の Choice JSON)を逐次パース
+- チャンク構成:
   1. role チャンク: `{delta: {role: "assistant"}}`
-  2. content / tool_calls チャンク: `{delta: {content: "..."} or tool_calls: [...]}`(tool_calls 優先)
-  3. finish_reason チャンク: `{delta: {}, finish_reason: "stop" or "tool_calls"}`
+  2. content チャンク(複数): `{delta: {content: "..."}}` — OCI イベントが累積形・差分形のいずれでも重複なく送出(送信済み prefix 比較)
+  3. tool_calls チャンク(ある場合のみ1件): `{delta: {tool_calls: [{index, id, type, function}]}}` — 分割到着するため完了後に集約
+  4. finish_reason チャンク: `{delta: {}, finish_reason: "stop" or "tool_calls" or "length"}`(+ `usage`, OCI が返した場合のみ)
 - 終端: `data: [DONE]\n\n`
+- OCI が SSE ではなく一括 JSON を返した場合は全体を1チャンク化するフォールバックあり
+- ストリーム開始前の OCI エラーは `502 + OCI例外メッセージ` で返却。開始後のエラーは切断のみ(OpenAI 形式エラーを返せないため)
 
-### 7.2 制約(真のトークン単位ストリーミングは未対応)
+### 7.2 制約
 
-OCI SDK の同期 API で応答全体を取得 → 単一チャンクにまとめて送出しているため、UX 上は一括表示。OCI SDK の `IsStream=true` サポートが公式に確認でき次第、真のトークンストリーミング実装に切替予定。
+- `tool_calls` の引数 JSON はストリーミング分割送出せず、完了後に一括送出する(opencode は対応済みのため動作に支障なし)
+- OCI イベント形状は `ChatResult` ラッパー / 素の Choice (`{index, message, finishReason, pad}`)の両対応。未知形状のイベントは警告ログでスキップ
+- `usage` は OCI が `streamOptions.isIncludeUsage` 応答を返した場合のみ最終チャンクに付与。返さないモデルでは省略(null)
 
 ---
 
@@ -327,7 +332,7 @@ OCI 側エラー(401/403/429/5xx)は基本的に透過せず `502 + OCI例外メ
 
 | ID | 項目 | 状態 | 影響 |
 |---|---|---|---|
-| T-1 | 真のトークン單位ストリーミング | **未対応** | UX 上は一括表示。OCI SDK の `IsStream=true` サポートが公式に確認でき次第対応(7.2節) |
+| T-1 | 真のトークン單位ストリーミング | **対応済(2026-10-12)** | stream 時のみ REST 直叩きでトークン単位 SSE 素通し(7章)。`tool_calls` 引数は一括送出のまま |
 | T-2 | `tool_choice` パラメータのOCI への透過 | **受信のみ・OCI未送信** | OCI 既定動作で動作するが、`required` / 特定関数指定等の明示は反映されない |
 | T-3 | `usage` 統計(prompt_tokens / completion_tokens) | **対応済(Chat) / Embeddingは常に0** | Chat は `GenericChatResponse.Usage` からマッピング済(2026-08-26)。Embedding は OCI `EmbedTextResult` がトークン数を返さないため `0` 埋め |
 | T-4 | `response_format`(JSON Schema 構造化出力) | **未対応** | クライアントからの `response_format` フィールドは無視される |
@@ -372,8 +377,8 @@ openai2oci/
 ├── Models/
 │   └── OpenAIDtos.cs                   (リクエスト/レスポンス record: Chat + Embeddings)
 ├── Services/
-│   ├── OCIAIChatEngine.cs              (OCI SDK ラッパ: ChatAsync / EmbedAsync)
-│   └── OciClientExtensions.cs          (DI 登録拡張メソッド: OciClientRegistry)
+│   ├── OCIAIChatEngine.cs              (OCI ラッパ: ChatAsync / ChatStreamAsync(REST SSE) / EmbedAsync)
+│   └── OciClientExtensions.cs          (DI 登録拡張メソッド: OciClientRegistry / OciAuthEntry)
 └── appsettings.json                    (Kestrel URL + OpenAI2Oci 設定)
 ```
 
@@ -381,12 +386,12 @@ openai2oci/
 
 | 設計書項目 | 決定 |
 |---|---|
-| 3.1 OCI呼び出し方式 | **OCI公式SDK** を採用（`OCI.DotNetSDK.Generativeaiinference 135.0.0`）。既存資産 `ocitest1` との整合性重視。Beraer 形式への切替は将来課題として残置。 |
+| 3.1 OCI呼び出し方式 | **OCI公式SDK + stream 時のみ REST 直叩き**（`OCI.DotNetSDK.Generativeaiinference 148.1.0`）。既存資産 `ocitest1` との整合性重視。Beraer 形式への切替は将来課題として残置。 |
 | 3.2 モデルファミリー判定 | **Chat: `GenericChatRequest` 固定 / Embedding: `EmbedText` 固定**。`CohereChatRequest` は対応外、`cohere.embed-*` は `EmbeddingModels` で分離。 |
 | 4.1 モデル一覧データソース | **案A（固定リスト）**。`appsettings.json` の `OpenAI2Oci:Models` + `EmbeddingModels` から生成。`ContentRootPath = AppContext.BaseDirectory` で VS 起動時の読み込み問題を回避。 |
 | 5章 認証（プロキシ→OCI） | `ConfigFileAuthenticationDetailsProvider("~/.oci/config", profile)` で **OCI 署名認証** を使用。Bearer 形式には未切替。 |
 | 6章 Function Calling | **プロキシは変換のみ**(A方針)。ツール実行はクライアント(opencode)側。再帰OCI呼び出しループは `OCIAIChatEngine` から削除済み（旧 `processToolCalls` 廃止）。 |
-| 7章 ストリーミング | **Phase 2 暫定版**。OCI 応答を単一 SSE チャンクにまとめて送出。3 チャンク（role → content/tool_calls → finish_reason）+ `data: [DONE]`。真のトークン単位ストリーミングは未対応。`WriteSseAsync` で role/content/tool_calls/finish_reason を個別チャンクで送出後、`Results.Empty` を返す。 |
+| 7章 ストリーミング | **真のトークンストリーミング**(2026-10-12)。`ChatStreamAsync` で `POST /20231130/actions/chat` (`isStream:true`) を署名付き HttpClient で直叩きし、OCI SSE を OpenAI chunk に逐次変換。tool_calls は完了後集約。旧 `WriteSseAsync` 擬似版は廃止。 |
 
 ### 15.3 設定管理の実装形
 
@@ -446,6 +451,7 @@ openai2oci/
 
 - `ContentRootPath` を `AppContext.BaseDirectory` に固定(VSの"Project"プロファイルで `appsettings.json` が読めない問題を回避)
 - 起動時に `OciAuthProfiles` の `Id` 重複・`OciCompartmentId` 空・`Models[].AuthProfileId` / `EmbeddingModels[].AuthProfileId` の存在を検証(fail-fast)
+- ストリーミング用に `~/.oci/config` の各プロファイルへ `region` 設定が必須(`OciClientRegistry` が `provider.Region.RegionId` からエンドポイントを構築。未設定は起動時 fail-fast)
 - リクエスト時のパラメータ解決(Chat): `body.Temperature ?? modelSetting.Temperature`(リクエスト値優先、無ければ `Models[]` の既定値)。Embedding は `dimensions` をそのまま `OutputDimensions` に透過
 - **Cohere Chat 系モデル (`cohere.*`) は登録不可**(3.2節・13章)。Embedding は `EmbeddingModels` に登録
 
@@ -470,12 +476,13 @@ OpenAI プロトコルは `tool_call_id` / `tool_calls` のような snake_case 
 | 2026-08-24 | ツール呼び出し往復（多段: 7 連続 tool call）動作確認。seleniumsvr 経由で kakaku.com から REGZA 43M550M の価格情報を取得・要約 |
 | 2026-08-26 | `usage` 対応: `GenericChatResponse.Usage` を `prompt_tokens/completion_tokens/total_tokens` にマッピング |
 | 2026-09-06 | Embedding 対応: `POST /v1/embeddings` (Cohere Embed v4) 動作確認。`curl /v1/embeddings` で float 配列・base64・batch・dimensions(1024) を確認。`GET /v1/models` に `cohere.embed-v4.0` が含まれることを確認 |
+| 2026-10-12 | 真のトークンストリーミング対応: `ChatStreamAsync` (REST 直叩き) 実装。`curl -N ... stream:true` でトークン逐次受信を確認(`openai.gpt-oss-120b`)。OCI イベント実形は素の Choice `{index, message, pad}` のため両形状対応。SDK 148.1.0 へ更新 |
 
 ### 15.6 既知の制約 / 残 TODO
 
-- **真のトークン単位ストリーミング**: OCI 応答を単一チャンクで送出しているため、UX 上は一括表示。真のストリーミングには OCI SDK の SSE サポート検証が必要。
+- **トークン単位ストリーミング**: 実装済(`ChatStreamAsync`, 2026-10-12)。`tool_calls` 引数は分割送出せず完了後に一括送出する。
 - **`tool_choice` パラメータ**: 受信するが OCI には渡していない（OCI 既定動作）。
-- **`usage` 統計**: Chat は実装済(`GenericChatResponse.Usage`→OpenAI形式)。Embedding は OCI `EmbedTextResult` がトークン数を返さないため `0` 埋め。
+- **`usage` 統計**: Chat 非stream は実装済(`GenericChatResponse.Usage`→OpenAI形式)。Chat stream は OCI が `isIncludeUsage` 応答を返した場合のみ最終チャンクに付与。Embedding は OCI `EmbedTextResult` がトークン数を返さないため `0` 埋め。
 - **`response_format`**: JSON Schema 構造化出力、未対応。
 - **マルチモーダル入力**: 実装済（`OpenAIToOciConverter.ToOciContents`）。`image_url`(base64/URL + `detail`) → OCI `ImageContent{ImageUrl}` に変換。opencode 側で `attachment: true` + `modalities.input: ["text","image"]` を宣言したモデルでのみ画像添付 UI が有効化される。
 - **マルチモーダル tool 結果**: 設計書 6章の「tool role ではなく user に画像分割」実装済（`ToOciMessages` で ToolMessage(text) + UserMessage(images) に分割）。
