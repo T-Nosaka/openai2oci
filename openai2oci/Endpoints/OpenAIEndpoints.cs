@@ -236,11 +236,14 @@ public static class OpenAIEndpoints
             var topP = body.TopP ?? modelSetting.TopP;
             var topK = body.TopK ?? modelSetting.TopK;
 
-            // OpenAI → OCI 変換(messages + tools)
+            // OpenAI → OCI 変換(messages + tools + reasoning_effort)
+            // reasoning_effort は明示指定時のみ透過。未指定ならOCIへ送らない(非対応モデル対策)。
             List<Message> ociMessages;
+            GenericChatRequest.ReasoningEffortEnum? ociReasoningEffort;
             try
             {
                 ociMessages = body.Messages.SelectMany(OpenAIToOciConverter.ToOciMessages).ToList();
+                ociReasoningEffort = OpenAIToOciConverter.ToOciReasoningEffort(body.ReasoningEffort);
             }
             catch (ArgumentException ex)
             {
@@ -263,6 +266,7 @@ public static class OpenAIEndpoints
                         frequencyPenalty: body.FrequencyPenalty,
                         presencePenalty: body.PresencePenalty,
                         tools: ociTools,
+                        reasoningEffort: ociReasoningEffort,
                         ct: ctx.RequestAborted);
                 }
                 catch (Exception ex)
@@ -292,7 +296,8 @@ public static class OpenAIEndpoints
                     modelSetting.AuthProfileId, body.Model, ociMessages, maxTokens, temperature, topP, topK,
                     frequencyPenalty: body.FrequencyPenalty,
                     presencePenalty: body.PresencePenalty,
-                    tools: ociTools);
+                    tools: ociTools,
+                    reasoningEffort: ociReasoningEffort);
             }
             catch (Exception ex)
             {

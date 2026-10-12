@@ -162,6 +162,7 @@ Chat の新モデル追加時も常に `GenericChatRequest` を使うため、�
 | `tool_choice` | △ | 受信するがOCIには渡さない(OCI既定動作) |
 | `frequency_penalty` / `presence_penalty` | ○ | `null` の場合はフィールド自体を送信しない(`OptionalGenericChatRequest` で Grok 等に対応、3.1節) |
 | `top_k` | ○ | OpenAI 標準には無いOCI固有拡張。`ModelSetting.TopK` またはリクエスト値 |
+| `reasoning_effort` | ○ | 明示指定時のみ OCI の `reasoningEffort` に透過。対応値: `none`/`minimal`/`low`/`medium`/`high`。`xhigh`/`max` 等は 400。未指定時はフィールド自体を送信しない(非対応モデル対策) |
 | `stop` | ○ | |
 | `response_format` | △ | 未対応(TODO) |
 | メッセージ内 `image_url` | ○ | 8章マルチモーダル |
@@ -275,6 +276,7 @@ OCI Generative AI の `ImageContent` は `Gemini` / `Grok` 等の対応モデル
 | `messages` 欠落 | 400 | 同上 `"Missing 'messages' field."` |
 | `model` 未登録 | 404 | `"Model 'xxx' is not configured. Add it to OpenAI2Oci:Models..."` |
 | `role:"tool"` で `tool_call_id` 欠落 | 400 | `"tool message requires tool_call_id"` |
+| `reasoning_effort` 不正 | 400 | `"Unsupported reasoning_effort 'xxx'. Supported: none, minimal, low, medium, high."` |
 | `input` 欠落/空 | 400 | `"Missing 'input' field."` / `"'input' must not be empty."` |
 | `input` が数値配列 | 400 | `"Numeric token input is not supported..."` |
 | `encoding_format` 不正 | 400 | `"Unsupported encoding_format 'xxx'. Use 'float' or 'base64'."` |
@@ -477,10 +479,12 @@ OpenAI プロトコルは `tool_call_id` / `tool_calls` のような snake_case 
 | 2026-08-26 | `usage` 対応: `GenericChatResponse.Usage` を `prompt_tokens/completion_tokens/total_tokens` にマッピング |
 | 2026-09-06 | Embedding 対応: `POST /v1/embeddings` (Cohere Embed v4) 動作確認。`curl /v1/embeddings` で float 配列・base64・batch・dimensions(1024) を確認。`GET /v1/models` に `cohere.embed-v4.0` が含まれることを確認 |
 | 2026-10-12 | 真のトークンストリーミング対応: `ChatStreamAsync` (REST 直叩き) 実装。`curl -N ... stream:true` でトークン逐次受信を確認(`openai.gpt-oss-120b`)。OCI イベント実形は素の Choice `{index, message, pad}` のため両形状対応。SDK 148.1.0 へ更新 |
+| 2026-10-12 | `reasoning_effort` 透過対応: 明示指定時のみ OCI `reasoningEffort` に透過(stream/非stream両対応)。`xai.grok-4.3` で `low` 透過を実機確認(completion_tokens 408→523)。`xhigh` は 400 |
 
 ### 15.6 既知の制約 / 残 TODO
 
 - **トークン単位ストリーミング**: 実装済(`ChatStreamAsync`, 2026-10-12)。`tool_calls` 引数は分割送出せず完了後に一括送出する。
+- **`reasoning_effort` 透過**: 実装済(2026-10-12)。明示指定時のみ OCI `reasoningEffort`(`NONE`/`MINIMAL`/`LOW`/`MEDIUM`/`HIGH`)に透過。`new` 隠しプロパティには基底の `StringEnumConverter` が引き継がれないため明示付与が必須(数値シリアル化されると OCI が `Please pass in correct format of request.` で拒否)。クライアント側の送出 UI が無い場合あり(ChatBox カスタムプロバイダでは未対応のため curl で検証)。
 - **`tool_choice` パラメータ**: 受信するが OCI には渡していない（OCI 既定動作）。
 - **`usage` 統計**: Chat 非stream は実装済(`GenericChatResponse.Usage`→OpenAI形式)。Chat stream は OCI が `isIncludeUsage` 応答を返した場合のみ最終チャンクに付与。Embedding は OCI `EmbedTextResult` がトークン数を返さないため `0` 埋め。
 - **`response_format`**: JSON Schema 構造化出力、未対応。

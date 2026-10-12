@@ -29,6 +29,15 @@ public class OptionalGenericChatRequest : GenericChatRequest
 
     [JsonProperty("presencePenalty", NullValueHandling = NullValueHandling.Ignore)]
     public new double? PresencePenalty { get; set; }
+
+    // ReasoningEffort は SDK 上 nullable enum のため未設定時は null だが、
+    // 明示的に NullValueHandling.Ignore で隠し、未指定時にフィールド自体を送信しない。
+    // (非対応モデルがフィールドの存在自体を拒否する可能性があるため。frequency_penalty 等と同方針)
+    // 基底の StringEnumConverter は new 隠しで引き継がれないため明示的に付与する
+    // (付けないと数値シリアル化され OCI が "Please pass in correct format of request." で拒否する)。
+    [JsonProperty("reasoningEffort", NullValueHandling = NullValueHandling.Ignore)]
+    [JsonConverter(typeof(Newtonsoft.Json.Converters.StringEnumConverter))]
+    public new GenericChatRequest.ReasoningEffortEnum? ReasoningEffort { get; set; }
 }
 
 /// <summary>
@@ -65,6 +74,7 @@ public class OCIAIChatEngine
         double? frequencyPenalty = null,
         double? presencePenalty = null,
         List<ToolDefinition>? tools = null,
+        GenericChatRequest.ReasoningEffortEnum? reasoningEffort = null,
         CancellationToken ct = default)
     {
         var entry = _registry.Get(authProfileId);
@@ -84,15 +94,16 @@ public class OCIAIChatEngine
                 TopK = topK,
                 FrequencyPenalty = frequencyPenalty,
                 PresencePenalty = presencePenalty,
-                Tools = tools
+                Tools = tools,
+                ReasoningEffort = reasoningEffort
             }
         };
 
         var chatRequest = new ChatRequest { ChatDetails = chatDetails };
 
         _logger?.LogInformation(
-            "OCI Chat: authProfile={AuthProfile}, model={Model}, messages={Count}, tools={ToolCount}, maxTokens={MaxTokens}, temperature={Temperature}, freqPenalty={FreqPenalty}, presPenalty={PresPenalty}",
-            authProfileId, modelId, messages.Count, tools?.Count ?? 0, maxTokens, temperature, frequencyPenalty, presencePenalty);
+            "OCI Chat: authProfile={AuthProfile}, model={Model}, messages={Count}, tools={ToolCount}, maxTokens={MaxTokens}, temperature={Temperature}, freqPenalty={FreqPenalty}, presPenalty={PresPenalty}, reasoningEffort={ReasoningEffort}",
+            authProfileId, modelId, messages.Count, tools?.Count ?? 0, maxTokens, temperature, frequencyPenalty, presencePenalty, reasoningEffort);
 
         return await ociClient.Chat(chatRequest);
     }
@@ -153,6 +164,7 @@ public class OCIAIChatEngine
         double? frequencyPenalty = null,
         double? presencePenalty = null,
         List<ToolDefinition>? tools = null,
+        GenericChatRequest.ReasoningEffortEnum? reasoningEffort = null,
         CancellationToken ct = default)
     {
         var entry = _registry.Get(authProfileId);
@@ -171,6 +183,7 @@ public class OCIAIChatEngine
                 FrequencyPenalty = frequencyPenalty,
                 PresencePenalty = presencePenalty,
                 Tools = tools,
+                ReasoningEffort = reasoningEffort,
                 IsStream = true,
                 StreamOptions = new StreamOptions { IsIncludeUsage = true }
             }
@@ -180,8 +193,8 @@ public class OCIAIChatEngine
         var json = JsonConvert.SerializeObject(chatDetails);
 
         _logger?.LogInformation(
-            "OCI Chat stream: authProfile={AuthProfile}, model={Model}, messages={Count}, tools={ToolCount}",
-            authProfileId, modelId, messages.Count, tools?.Count ?? 0);
+            "OCI Chat stream: authProfile={AuthProfile}, model={Model}, messages={Count}, tools={ToolCount}, reasoningEffort={ReasoningEffort}",
+            authProfileId, modelId, messages.Count, tools?.Count ?? 0, reasoningEffort);
 
         using var req = new HttpRequestMessage(HttpMethod.Post, url);
         req.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");

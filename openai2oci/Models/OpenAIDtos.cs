@@ -20,7 +20,10 @@ public record ChatCompletionRequest(
     [property: JsonPropertyName("frequency_penalty")] double? FrequencyPenalty = null,
     [property: JsonPropertyName("presence_penalty")] double? PresencePenalty = null,
     // OpenAI標準には無いOCI固有拡張。クライアントが明示指定した場合のみ優先する(設計書4.2節)。
-    [property: JsonPropertyName("top_k")] int? TopK = null);
+    [property: JsonPropertyName("top_k")] int? TopK = null,
+    // OpenAI標準パラメータ。明示指定時のみOCIの reasoningEffort に透過する。
+    // 非対応モデルに送るとOCIが400を返すため、未指定時はフィールド自体を送信しない(呼び出し側の責任)。
+    [property: JsonPropertyName("reasoning_effort")] string? ReasoningEffort = null);
 
 public record OpenAIMessage(
     string Role,

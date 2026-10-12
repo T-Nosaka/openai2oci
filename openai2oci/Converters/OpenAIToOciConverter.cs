@@ -273,6 +273,30 @@ private static void SanitizeSchemaForOci(JObject schema)
     }
 
     /// <summary>
+    /// OpenAI の reasoning_effort → OCI の ReasoningEffortEnum。
+    /// 未指定(null/空文字)は null を返し、OCI へはフィールド自体を送信しない
+    /// (非対応モデルが存在自体を拒否する可能性があるため。呼び出し側の責任で明示指定時のみ透過)。
+    /// OCI が対応するのは NONE/MINIMAL/LOW/MEDIUM/HIGH のみ。xhigh/max 等は 400 扱い。
+    /// </summary>
+    public static GenericChatRequest.ReasoningEffortEnum? ToOciReasoningEffort(string? reasoningEffort)
+    {
+        if (string.IsNullOrWhiteSpace(reasoningEffort))
+        {
+            return null;
+        }
+        return reasoningEffort.Trim().ToLowerInvariant() switch
+        {
+            "none" => GenericChatRequest.ReasoningEffortEnum.None,
+            "minimal" => GenericChatRequest.ReasoningEffortEnum.Minimal,
+            "low" => GenericChatRequest.ReasoningEffortEnum.Low,
+            "medium" => GenericChatRequest.ReasoningEffortEnum.Medium,
+            "high" => GenericChatRequest.ReasoningEffortEnum.High,
+            _ => throw new ArgumentException(
+                $"Unsupported reasoning_effort '{reasoningEffort}'. Supported: none, minimal, low, medium, high.")
+        };
+    }
+
+    /// <summary>
     /// Gemini Vertex AI の Function Calling は properties 内の各パラメータに
     /// `type` 必須。MCP由来のスキーマで省略されている場合に補完する。
     /// ・properties あり → "object" ・items あり → "array" ・それ以外 → "string"
