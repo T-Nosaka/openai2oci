@@ -145,6 +145,70 @@ public class OCIAIChatEngine
         return await ociClient.EmbedText(embedRequest);
     }
 
+    // 429(レート制限)・503 の再試行設定
+    private const int ThrottleMaxRetries = 5;
+    private static readonly TimeSpan ThrottleBaseDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ThrottleMaxDelay = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// OCI へ stream 送信する。429/503 の場合はレスポンスヘッダー送出前なので、
+    /// Retry-After または指数バックオフで待機してから再送する。
+    /// </summary>
+    private async Task<System.Net.Http.HttpResponseMessage> SendChatWithRetryAsync(
+        System.Net.Http.HttpClient http,
+        string url,
+        string json,
+        string authProfileId,
+        string modelId,
+        CancellationToken ct)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            using var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, url);
+            req.Content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+            req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+            var resp = await http.SendAsync(req, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, ct);
+            if (resp.IsSuccessStatusCode)
+            {
+                return resp;
+            }
+
+            var status = (int)resp.StatusCode;
+            bool retryable = status == 429 || status == 503;
+            if (!retryable || attempt >= ThrottleMaxRetries)
+            {
+                var err = await resp.Content.ReadAsStringAsync(ct);
+                resp.Dispose();
+                throw new InvalidOperationException($"OCI streaming chat failed ({status}): {err}");
+            }
+
+            var delay = ComputeThrottleDelay(resp, attempt);
+            _logger?.LogWarning(
+                "OCI throttled ({Status}): retry {Attempt}/{Max} in {DelaySec:F1}s, authProfile={AuthProfile}, model={Model}",
+                status, attempt + 1, ThrottleMaxRetries, delay.TotalSeconds, authProfileId, modelId);
+            resp.Dispose();
+
+            await Task.Delay(delay, ct);
+        }
+    }
+
+    private static TimeSpan ComputeThrottleDelay(System.Net.Http.HttpResponseMessage resp, int attempt)
+    {
+        // サーバーが Retry-After を指定していればそれを優先
+        var retryAfter = resp.Headers.RetryAfter?.Delta;
+        if (retryAfter is { } serverDelay && serverDelay > TimeSpan.Zero)
+        {
+            return serverDelay < ThrottleMaxDelay ? serverDelay : ThrottleMaxDelay;
+        }
+
+        // 指数バックオフ(5s, 10s, 20s, 40s, 60s で頭打ち)+ ジッタ(0〜1s)
+        var exp = TimeSpan.FromSeconds(ThrottleBaseDelay.TotalSeconds * Math.Pow(2, attempt));
+        var capped = exp < ThrottleMaxDelay ? exp : ThrottleMaxDelay;
+        return capped + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 1000));
+    }
+
     /// <summary>
     /// OCI Chat ストリーミング呼び出し(REST直叩き)。
     /// SDK の Chat() は SSE ストリームのパースに未対応のため、stream:true 時のみ
@@ -196,18 +260,7 @@ public class OCIAIChatEngine
             "OCI Chat stream: authProfile={AuthProfile}, model={Model}, messages={Count}, tools={ToolCount}, reasoningEffort={ReasoningEffort}",
             authProfileId, modelId, messages.Count, tools?.Count ?? 0, reasoningEffort);
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, url);
-        req.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
-        req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("text/event-stream"));
-
-        using var ociResp = await entry.StreamHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-        if (!ociResp.IsSuccessStatusCode)
-        {
-            var err = await ociResp.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException(
-                $"OCI streaming chat failed ({(int)ociResp.StatusCode}): {err}");
-        }
+        using var ociResp = await SendChatWithRetryAsync(entry.StreamHttp, url, json, authProfileId, modelId, ct);
 
         response.ContentType = "text/event-stream";
         response.Headers.CacheControl = "no-cache";
