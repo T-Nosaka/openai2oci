@@ -147,8 +147,8 @@ public class OCIAIChatEngine
 
     // 429(レート制限)・503 の再試行設定
     private const int ThrottleMaxRetries = 5;
-    private static readonly TimeSpan ThrottleBaseDelay = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan ThrottleMaxDelay = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan ThrottleBaseDelay = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ThrottleMaxDelay = TimeSpan.FromSeconds(180);
 
     /// <summary>
     /// OCI へ stream 送信する。429/503 の場合はレスポンスヘッダー送出前なので、
@@ -203,7 +203,7 @@ public class OCIAIChatEngine
             return serverDelay < ThrottleMaxDelay ? serverDelay : ThrottleMaxDelay;
         }
 
-        // 指数バックオフ(5s, 10s, 20s, 40s, 60s で頭打ち)+ ジッタ(0〜1s)
+        // 指数バックオフ ジッタ(0〜1s)
         var exp = TimeSpan.FromSeconds(ThrottleBaseDelay.TotalSeconds * Math.Pow(2, attempt));
         var capped = exp < ThrottleMaxDelay ? exp : ThrottleMaxDelay;
         return capped + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 1000));
