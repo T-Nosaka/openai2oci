@@ -96,6 +96,51 @@ public static class OpenAIToOciConverter
     }
 
     /// <summary>
+    /// 直前の assistant.tool_calls に対応しない tool メッセージを破棄する。
+    /// OCI は tool 結果に対応する tool 要求が無いと 400 を返すため、変換前に除外する。
+    /// </summary>
+    public static List<OpenAIMessage> DropOrphanToolMessages(
+        IEnumerable<OpenAIMessage> messages,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
+    {
+        var result = new List<OpenAIMessage>();
+        var pendingIds = new HashSet<string>(StringComparer.Ordinal);
+        int dropped = 0;
+
+        foreach (var m in messages)
+        {
+            if (m.Role == "assistant")
+            {
+                pendingIds = m.ToolCalls is { Count: > 0 }
+                    ? m.ToolCalls.Select(tc => tc.Id).ToHashSet(StringComparer.Ordinal)
+                    : new HashSet<string>(StringComparer.Ordinal);
+            }
+            else if (m.Role == "tool")
+            {
+                if (string.IsNullOrEmpty(m.ToolCallId) || !pendingIds.Remove(m.ToolCallId))
+                {
+                    dropped++;
+                    logger?.LogWarning("Orphan tool message dropped: tool_call_id={ToolCallId}", m.ToolCallId);
+                    continue;
+                }
+            }
+            else
+            {
+                // user / system が挟まったら、直前の tool_calls への対応は終わったとみなす
+                pendingIds.Clear();
+            }
+
+            result.Add(m);
+        }
+
+        if (dropped > 0)
+        {
+            logger?.LogWarning("Dropped {Count} orphan tool message(s)", dropped);
+        }
+        return result;
+    }
+
+    /// <summary>
     /// OpenAI の message.content(文字列 or マルチモーダル配列)を OCI の ChatContent[] に変換。
     /// 対応: {"type":"text","text":...} → TextContent
     ///       {"type":"image_url","image_url":{"url":...,"detail":...}} → ImageContent

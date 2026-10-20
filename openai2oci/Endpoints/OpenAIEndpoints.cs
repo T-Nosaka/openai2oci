@@ -242,7 +242,9 @@ public static class OpenAIEndpoints
             GenericChatRequest.ReasoningEffortEnum? ociReasoningEffort;
             try
             {
-                ociMessages = body.Messages.SelectMany(OpenAIToOciConverter.ToOciMessages).ToList();
+                var logger = ctx.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("openai2oci.Endpoints.OpenAIEndpoints");
+                var validMessages = OpenAIToOciConverter.DropOrphanToolMessages(body.Messages!, logger);
+                ociMessages = validMessages.SelectMany(OpenAIToOciConverter.ToOciMessages).ToList();
                 ociReasoningEffort = OpenAIToOciConverter.ToOciReasoningEffort(body.ReasoningEffort);
             }
             catch (ArgumentException ex)

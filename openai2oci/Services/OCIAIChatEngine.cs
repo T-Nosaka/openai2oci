@@ -3,6 +3,7 @@ using Newtonsoft.Json;
 using Oci.GenerativeaiinferenceService.Models;
 using Oci.GenerativeaiinferenceService.Requests;
 using Oci.GenerativeaiinferenceService.Responses;
+using System.Diagnostics.Tracing;
 using System.Text;
 
 namespace openai2oci.Services;
@@ -176,24 +177,32 @@ public class OCIAIChatEngine
             }
 
             var status = (int)resp.StatusCode;
-            bool retryable = status == 429 || status == 503;
-            if (!retryable || attempt >= ThrottleMaxRetries)
+            var err = await resp.Content.ReadAsStringAsync(ct);
+
+            // 429/503: スロットリング → Retry-After または指数バックオフで再送
+            if ((status == 429 || status == 503) && attempt < ThrottleMaxRetries)
             {
-                var err = await resp.Content.ReadAsStringAsync(ct);
+                var delay = ComputeThrottleDelay(resp, attempt);
+                _logger?.LogWarning(
+                    "OCI throttled ({Status}): retry {Attempt}/{Max} in {DelaySec:F1}s, authProfile={AuthProfile}, model={Model}",
+                    status, attempt + 1, ThrottleMaxRetries, delay.TotalSeconds, authProfileId, modelId);
                 resp.Dispose();
-                throw new InvalidOperationException($"OCI streaming chat failed ({status}): {err}");
+                await Task.Delay(delay, ct);
+                continue;
             }
 
-            var delay = ComputeThrottleDelay(resp, attempt);
-            _logger?.LogWarning(
-                "OCI throttled ({Status}): retry {Attempt}/{Max} in {DelaySec:F1}s, authProfile={AuthProfile}, model={Model}",
-                status, attempt + 1, ThrottleMaxRetries, delay.TotalSeconds, authProfileId, modelId);
             resp.Dispose();
-
-            await Task.Delay(delay, ct);
+            throw new InvalidOperationException($"OCI streaming chat failed ({status}): {err}");
         }
     }
 
+
+    /// <summary>
+    /// 利用量スロットリング対応
+    /// </summary>
+    /// <param name="resp"></param>
+    /// <param name="attempt"></param>
+    /// <returns></returns>
     private static TimeSpan ComputeThrottleDelay(System.Net.Http.HttpResponseMessage resp, int attempt)
     {
         // サーバーが Retry-After を指定していればそれを優先
@@ -311,7 +320,7 @@ public class OCIAIChatEngine
             string? delta = null;
             try
             {
-                delta = ExtractStreamDelta(payload, sentText, toolAcc, ref lastFinishReason, ref lastUsage);
+                delta = ExtractStreamDelta(payload, sentText, messages, toolAcc, ref lastFinishReason, ref lastUsage);
             }
             catch (Exception ex)
             {
@@ -332,7 +341,7 @@ public class OCIAIChatEngine
         // フォールバック: SSE イベントが1件も無い場合は非ストリーミング応答として全体を処理
         if (eventCount == 0 && rawDump.Length > 0)
         {
-            var fallback = ExtractStreamDelta(rawDump.ToString(), sentText, toolAcc, ref lastFinishReason, ref lastUsage);
+            var fallback = ExtractStreamDelta(rawDump.ToString(), sentText, messages, toolAcc, ref lastFinishReason, ref lastUsage);
             if (!string.IsNullOrEmpty(fallback))
             {
                 await WriteStreamChunk(response, id, created, modelId, delta: new { content = fallback }, finishReason: null, usage: null);
@@ -376,9 +385,10 @@ public class OCIAIChatEngine
     /// toolCalls は toolAcc に蓄積、finishReason/usage は ref で更新する。
     /// OCI のイベントは累積形・差分形のいずれの可能性もあるため、送信済み prefix と比較して差分だけ返す。
     /// </summary>
-    private static string? ExtractStreamDelta(
+    private string? ExtractStreamDelta(
         string payload,
         StringBuilder sentText,
+        List<Message> messages,
         List<ToolCallAcc> toolAcc,
         ref string? lastFinishReason,
         ref (int prompt, int completion, int total)? lastUsage)
@@ -394,12 +404,12 @@ public class OCIAIChatEngine
             {
                 return null;
             }
-            return ExtractChoiceDelta(choices[0], sentText, toolAcc, ref lastFinishReason);
+            return ExtractChoiceDelta(choices[0], sentText, messages, toolAcc, ref lastFinishReason);
         }
         if (root.TryGetProperty("message", out _) || root.TryGetProperty("finishReason", out _))
         {
             ReadStreamUsage(root, ref lastUsage);
-            return ExtractChoiceDelta(root, sentText, toolAcc, ref lastFinishReason);
+            return ExtractChoiceDelta(root, sentText, messages, toolAcc, ref lastFinishReason);
         }
         return null;
     }
@@ -418,9 +428,10 @@ public class OCIAIChatEngine
     }
 
     /// <summary>Choice 相当要素1件からテキスト差分を抽出する。toolCalls/finishReason も反映する。</summary>
-    private static string? ExtractChoiceDelta(
+    private string? ExtractChoiceDelta(
         System.Text.Json.JsonElement ch,
         StringBuilder sentText,
+        List<Message> messages,
         List<ToolCallAcc> toolAcc,
         ref string? lastFinishReason)
     {
@@ -456,15 +467,19 @@ public class OCIAIChatEngine
                 int idx = 0;
                 foreach (var tc in tcs.EnumerateArray())
                 {
+                    _logger?.LogInformation( "tools: {tc}", tc );
+
                     var id = tc.TryGetProperty("id", out var ide) && ide.ValueKind == System.Text.Json.JsonValueKind.String
                         ? ide.GetString() ?? "" : "";
                     var name = tc.TryGetProperty("name", out var ne) && ne.ValueKind == System.Text.Json.JsonValueKind.String
                         ? ne.GetString() ?? "" : "";
                     var args = tc.TryGetProperty("arguments", out var ae) && ae.ValueKind == System.Text.Json.JsonValueKind.String
                         ? ae.GetString() ?? "" : "";
+
                     ToolCallAcc acc;
                     if (idx < toolAcc.Count && (string.IsNullOrEmpty(id) || toolAcc[idx].Id == id))
                     {
+                        //蓄積されていたIDがあった場合、採用
                         acc = toolAcc[idx];
                     }
                     else
@@ -472,10 +487,12 @@ public class OCIAIChatEngine
                         var byId = string.IsNullOrEmpty(id) ? null : toolAcc.FirstOrDefault(a => a.Id == id);
                         if (byId != null)
                         {
+                            //蓄積されていたIDがあった場合、採用
                             acc = byId;
                         }
                         else
                         {
+                            //Toolを追加する。この時にIDがセットされない場合、UUIDをセットする。
                             acc = new ToolCallAcc { Id = string.IsNullOrEmpty(id) ? Guid.NewGuid().ToString() : id };
                             toolAcc.Add(acc);
                         }
