@@ -243,8 +243,8 @@ public static class OpenAIEndpoints
             try
             {
                 var logger = ctx.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("openai2oci.Endpoints.OpenAIEndpoints");
-                var validMessages = OpenAIToOciConverter.DropOrphanToolMessages(body.Messages!, logger);
-                var orderedMessages = OpenAIToOciConverter.OrderToolResults(validMessages, logger);
+                //Tools順序整合性調整
+                var orderedMessages = OpenAIToOciConverter.OrderToolResults(body.Messages!, logger);
                 ociMessages = orderedMessages.SelectMany(OpenAIToOciConverter.ToOciMessages).ToList();
                 ociReasoningEffort = OpenAIToOciConverter.ToOciReasoningEffort(body.ReasoningEffort);
             }

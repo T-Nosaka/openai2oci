@@ -179,11 +179,6 @@ public class OCIAIChatEngine
             var status = (int)resp.StatusCode;
             var err = await resp.Content.ReadAsStringAsync(ct);
 
-            if (status == 400 && err.Contains("toolCallId", StringComparison.OrdinalIgnoreCase))
-            {
-                LogToolCallIdMismatch(json, err, authProfileId, modelId);
-            }
-
             // 429/503: スロットリング → Retry-After または指数バックオフで再送
             if ((status == 429 || status == 503) && attempt < ThrottleMaxRetries)
             {
@@ -202,52 +197,6 @@ public class OCIAIChatEngine
     }
 
 
-    /// <summary>
-    /// OCI が toolCallId 不一致で 400 を返したとき、送った要求 ID と応答 ID の並びをログへ出す。
-    /// </summary>
-    private void LogToolCallIdMismatch(string json, string err, string authProfileId, string modelId)
-    {
-        _logger?.LogWarning(
-            "OCI toolCallId mismatch (400): authProfile={AuthProfile}, model={Model}, error={Error}",
-            authProfileId, modelId, err);
-
-        try
-        {
-            using var doc = System.Text.Json.JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("chatRequest", out var req) ||
-                !req.TryGetProperty("messages", out var msgs) ||
-                msgs.ValueKind != System.Text.Json.JsonValueKind.Array)
-            {
-                return;
-            }
-
-            int i = 0;
-            foreach (var m in msgs.EnumerateArray())
-            {
-                var role = m.TryGetProperty("role", out var re) ? re.GetString() : "?";
-                if (m.TryGetProperty("toolCalls", out var tcs) && tcs.ValueKind == System.Text.Json.JsonValueKind.Array)
-                {
-                    var ids = new List<string>();
-                    foreach (var tc in tcs.EnumerateArray())
-                    {
-                        var id = tc.TryGetProperty("id", out var ide) ? ide.GetString() : "(no id)";
-                        var name = tc.TryGetProperty("name", out var ne) ? ne.GetString() : "";
-                        ids.Add($"{id}:{name}");
-                    }
-                    _logger?.LogWarning("OCI sent [{Index}] {Role} toolCalls=[{Ids}]", i, role, string.Join(", ", ids));
-                }
-                if (m.TryGetProperty("toolCallId", out var tid))
-                {
-                    _logger?.LogWarning("OCI sent [{Index}] {Role} toolCallId={ToolCallId}", i, role, tid.GetString());
-                }
-                i++;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogWarning(ex, "Failed to parse OCI request while logging toolCallId mismatch");
-        }
-    }
     /// <summary>
     /// 利用量スロットリング対応
     /// </summary>
