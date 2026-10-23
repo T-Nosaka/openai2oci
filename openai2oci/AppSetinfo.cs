@@ -32,6 +32,11 @@ public class AppSetinfo
     /// <summary>指定IDのOCI認証プロファイルを取得(未登録なら null)</summary>
     public OciAuthProfile? FindAuthProfile(string authProfileId) =>
         OciAuthProfiles.FirstOrDefault(p => p.Id == authProfileId);
+
+    /// <summary>
+    /// SSE時に利用するUseProxy
+    /// </summary>
+    public bool HttpStreamUseProxy { get; set; } = false;
 }
 
 /// <summary>

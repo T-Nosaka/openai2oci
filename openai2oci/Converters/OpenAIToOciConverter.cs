@@ -98,6 +98,7 @@ public static class OpenAIToOciConverter
     /// <summary>
     /// 直前の assistant.tool_calls に対応しない tool メッセージを破棄する。
     /// OCI は tool 結果に対応する tool 要求が無いと 400 を返すため、変換前に除外する。
+    /// 要求 ID と応答 ID は、ドロップ有無にかかわらず毎回ログへ出す。
     /// </summary>
     public static List<OpenAIMessage> DropOrphanToolMessages(
         IEnumerable<OpenAIMessage> messages,
@@ -105,22 +106,43 @@ public static class OpenAIToOciConverter
     {
         var result = new List<OpenAIMessage>();
         var pendingIds = new HashSet<string>(StringComparer.Ordinal);
+        var requested = new List<string>();
+        var responded = new List<string>();
         int dropped = 0;
+        int assistantIndex = -1;
+        int messageIndex = -1;
 
         foreach (var m in messages)
         {
+            messageIndex++;
             if (m.Role == "assistant")
             {
-                pendingIds = m.ToolCalls is { Count: > 0 }
-                    ? m.ToolCalls.Select(tc => tc.Id).ToHashSet(StringComparer.Ordinal)
-                    : new HashSet<string>(StringComparer.Ordinal);
+                assistantIndex = messageIndex;
+                if (m.ToolCalls is { Count: > 0 })
+                {
+                    pendingIds = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var tc in m.ToolCalls)
+                    {
+                        var id = tc.Id ?? "";
+                        pendingIds.Add(id);
+                        requested.Add($"msg[{messageIndex}] assistant.tool_calls id={id} name={tc.Function?.Name}");
+                    }
+                }
+                else
+                {
+                    pendingIds = new HashSet<string>(StringComparer.Ordinal);
+                }
             }
             else if (m.Role == "tool")
             {
+                var id = m.ToolCallId ?? "";
+                responded.Add($"msg[{messageIndex}] tool.tool_call_id={id} pendingFrom=msg[{assistantIndex}]");
                 if (string.IsNullOrEmpty(m.ToolCallId) || !pendingIds.Remove(m.ToolCallId))
                 {
                     dropped++;
-                    logger?.LogWarning("Orphan tool message dropped: tool_call_id={ToolCallId}", m.ToolCallId);
+                    logger?.LogWarning(
+                        "Orphan tool message dropped: msg[{Index}] tool_call_id={ToolCallId} pendingFrom=msg[{AssistantIndex}] pending=[{Pending}]",
+                        messageIndex, m.ToolCallId, assistantIndex, string.Join(", ", pendingIds));
                     continue;
                 }
             }
@@ -133,13 +155,98 @@ public static class OpenAIToOciConverter
             result.Add(m);
         }
 
+        logger?.LogInformation(
+            "ToolCallId audit (OpenAI request): requested={RequestedCount} responded={RespondedCount} dropped={Dropped} unmatchedRemaining={Unmatched}",
+            requested.Count, responded.Count, dropped, pendingIds.Count);
+        foreach (var line in requested)
+        {
+            logger?.LogInformation("ToolCallId requested: {Line}", line);
+        }
+        foreach (var line in responded)
+        {
+            logger?.LogInformation("ToolCallId responded: {Line}", line);
+        }
+        if (pendingIds.Count > 0)
+        {
+            logger?.LogWarning(
+                "ToolCallId requested but no tool result: [{Pending}]",
+                string.Join(", ", pendingIds));
+        }
         if (dropped > 0)
         {
             logger?.LogWarning("Dropped {Count} orphan tool message(s)", dropped);
         }
         return result;
     }
+    /// <summary>
+    /// 各 assistant.tool_calls の直後に続く tool 結果を、要求と同じ順へ並べ替える。
+    /// OCI(Grok) は ID が揃っていても順番が違うと 400 を返す。
+    /// tool 以外(user 等)が挟まった時点で、その要求への並べ替えは打ち切る。
+    /// </summary>
+    public static List<OpenAIMessage> OrderToolResults(
+        IEnumerable<OpenAIMessage> messages,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
+    {
+        var src = messages as IList<OpenAIMessage> ?? messages.ToList();
+        var result = new List<OpenAIMessage>(src.Count);
+        for (int i = 0; i < src.Count; i++)
+        {
+            var m = src[i];
+            result.Add(m);
+            if (m.Role != "assistant" || m.ToolCalls is not { Count: > 0 })
+            {
+                continue;
+            }
 
+            int j = i + 1;
+            var tools = new List<OpenAIMessage>();
+            while (j < src.Count && src[j].Role == "tool")
+            {
+                tools.Add(src[j]);
+                j++;
+            }
+            if (tools.Count == 0)
+            {
+                continue;
+            }
+
+            var used = new bool[tools.Count];
+            var ordered = new List<OpenAIMessage>(tools.Count);
+            foreach (var tc in m.ToolCalls)
+            {
+                var id = tc.Id ?? "";
+                for (int k = 0; k < tools.Count; k++)
+                {
+                    if (!used[k] && string.Equals(tools[k].ToolCallId, id, StringComparison.Ordinal))
+                    {
+                        used[k] = true;
+                        ordered.Add(tools[k]);
+                        break;
+                    }
+                }
+            }
+            for (int k = 0; k < tools.Count; k++)
+            {
+                if (!used[k])
+                {
+                    ordered.Add(tools[k]);
+                }
+            }
+
+            var before = string.Join(",", tools.Select(t => t.ToolCallId));
+            var after = string.Join(",", ordered.Select(t => t.ToolCallId));
+            if (!string.Equals(before, after, StringComparison.Ordinal))
+            {
+                logger?.LogInformation(
+                    "Reordered tool results to match assistant.tool_calls: [{Before}] -> [{After}]",
+                    before, after);
+            }
+
+            result.AddRange(ordered);
+            i = j - 1;
+        }
+        return result;
+    }
     /// <summary>
     /// OpenAI の message.content(文字列 or マルチモーダル配列)を OCI の ChatContent[] に変換。
     /// 対応: {"type":"text","text":...} → TextContent

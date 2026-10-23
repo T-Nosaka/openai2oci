@@ -89,6 +89,9 @@ public static class OciClientExtensions
             // ストリーミング用: OCI署名付き HttpClient(REST直叩き用)。SDK の Chat() は
             // SSE ストリームのパースに未対応のため、stream:true 時のみこちらを使う。
             var streamHandler = OciHttpClientHandler.FromConfigFile(configFile, authProfile.OciConfigProfile);
+
+            streamHandler.UseProxy = setinfo.HttpStreamUseProxy;
+
             var streamHttp = new HttpClient(streamHandler) { Timeout = Timeout.InfiniteTimeSpan };
             var regionId = provider.Region?.RegionId ?? "";
             if (string.IsNullOrEmpty(regionId))
