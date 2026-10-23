@@ -237,7 +237,7 @@ public static class OpenAIEndpoints
             var topK = body.TopK ?? modelSetting.TopK;
 
             // OpenAI → OCI 変換(messages + tools + reasoning_effort)
-            // reasoning_effort は明示指定時のみ透過。未指定ならOCIへ送らない(非対応モデル対策)。
+            // リクエスト明示値 > Models[].ReasoningEffort。どちらも無ければ OCI へ送らない(非対応モデル対策)。
             List<Message> ociMessages;
             GenericChatRequest.ReasoningEffortEnum? ociReasoningEffort;
             try
@@ -246,7 +246,10 @@ public static class OpenAIEndpoints
                 //Tools順序整合性調整
                 var orderedMessages = OpenAIToOciConverter.OrderToolResults(body.Messages!, logger);
                 ociMessages = orderedMessages.SelectMany(OpenAIToOciConverter.ToOciMessages).ToList();
-                ociReasoningEffort = OpenAIToOciConverter.ToOciReasoningEffort(body.ReasoningEffort);
+                var reasoningEffort = string.IsNullOrWhiteSpace(body.ReasoningEffort)
+                    ? modelSetting.ReasoningEffort
+                    : body.ReasoningEffort;
+                ociReasoningEffort = OpenAIToOciConverter.ToOciReasoningEffort(reasoningEffort);
             }
             catch (ArgumentException ex)
             {
@@ -264,7 +267,7 @@ public static class OpenAIEndpoints
                 try
                 {
                     await engine.ChatStreamAsync(
-                        modelSetting.AuthProfileId, body.Model, ociMessages, maxTokens, temperature, topP, topK,
+                        modelSetting.AuthProfileId, modelSetting.ResolveOciModelId(), modelSetting.Id, ociMessages, maxTokens, temperature, topP, topK,
                         ctx.Response,
                         frequencyPenalty: body.FrequencyPenalty,
                         presencePenalty: body.PresencePenalty,
@@ -296,7 +299,7 @@ public static class OpenAIEndpoints
             try
             {
                 ociResponse = await engine.ChatAsync(
-                    modelSetting.AuthProfileId, body.Model, ociMessages, maxTokens, temperature, topP, topK,
+                    modelSetting.AuthProfileId, modelSetting.ResolveOciModelId(), ociMessages, maxTokens, temperature, topP, topK,
                     frequencyPenalty: body.FrequencyPenalty,
                     presencePenalty: body.PresencePenalty,
                     tools: ociTools,

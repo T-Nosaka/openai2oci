@@ -2,7 +2,7 @@
 
 - バージョン: 1.2 (Specification)
 - 作成日: 2026-08-24
-- 更新日: 2026-10-12(真のトークンストリーミング対応: stream 時のみ REST 直叩き, SDK 148.1.0)
+- 更新日: 2026-10-23(公開IDとOCIモデルIDの分離: Models[].OciModelId)
 - ステータス: 全機能実装済み・opencode で動作確認済(ストリーミング・Function Calling・マルチモーダル・Embeddings)
 
 > 本書は旧版(Draft)からの仕様確定版です。1〜13章は実装済み項目を**仕様**として記述しています。検討中・未実装の項目は各章の「制約」/「TODO」節、または 13章「オープン事項(残存課題)」を参照してください。実装メモ・決定履歴は 15章「実装メモ」を参照してください。
@@ -138,9 +138,9 @@ Chat の新モデル追加時も常に `GenericChatRequest` を使うため、�
 
 **データソース**: `appsettings.json` の `OpenAI2Oci:Models` 配列 + `OpenAI2Oci:EmbeddingModels` 配列(固定リスト案A)。
 
-- `Models` の各エントリは `ModelSetting` 構造体(`Id` / `AuthProfileId` / `MaxTokens` / `Temperature` / `TopP` / `TopK`)で、`IConfiguration.GetSection().Bind()` で読み込み
+- `Models` の各エントリは `ModelSetting` 構造体(`Id` / `OciModelId` / `AuthProfileId` / `MaxTokens` / `Temperature` / `TopP` / `TopK` / `ReasoningEffort`)で、`IConfiguration.GetSection().Bind()` で読み込み
 - `EmbeddingModels` の各エントリは `EmbeddingModelSetting` 構造体(`Id` / `AuthProfileId`)で、同様にバインド。Cohere Embed v4 をターゲットに `Models` とは明確に分離する
-- `Id` のみが `/v1/models` 返却値に使用される。`Models` の残りフィールドは `chat/completions` の既定値として使われる
+- `Id` が `/v1/models` と chat 応答の `model` に使われる。OCI へ要求する ID は `OciModelId`(空なら `Id`)。同じ OCI モデルを別名で複数公開できる
 - 起動時に `OpenAI2Oci:OciAuthProfiles` と `Models[].AuthProfileId` / `EmbeddingModels[].AuthProfileId` の整合性チェック(fail-fast)
 - レスポンスは `Models` と `EmbeddingModels` を連結して返却する(例: `openai.gpt-oss-120b` + `cohere.embed-v4.0`)
 
@@ -152,7 +152,7 @@ Chat の新モデル追加時も常に `GenericChatRequest` を使うため、�
 
 | OpenAIパラメータ | 対応 | 備考 |
 |---|---|---|
-| `model` | ○ | `appsettings.json` の `Models[].Id` と完全一致必須(不一致は 404) |
+| `model` | ○ | `appsettings.json` の `Models[].Id`(公開ID)と完全一致必須(不一致は 404)。OCI へは `OciModelId`(空なら `Id`)を要求する |
 | `messages` | ○ | role: system/user/assistant/tool。assistant + tool_calls も保持(往復整合性) |
 | `temperature` | ○ | リクエスト値 > `ModelSetting.Temperature`(既定値) |
 | `top_p` | ○ | リクエスト値 > `ModelSetting.TopP`(既定値) |
@@ -162,7 +162,7 @@ Chat の新モデル追加時も常に `GenericChatRequest` を使うため、�
 | `tool_choice` | △ | 受信するがOCIには渡さない(OCI既定動作) |
 | `frequency_penalty` / `presence_penalty` | ○ | `null` の場合はフィールド自体を送信しない(`OptionalGenericChatRequest` で Grok 等に対応、3.1節) |
 | `top_k` | ○ | OpenAI 標準には無いOCI固有拡張。`ModelSetting.TopK` またはリクエスト値 |
-| `reasoning_effort` | ○ | 明示指定時のみ OCI の `reasoningEffort` に透過。対応値: `none`/`minimal`/`low`/`medium`/`high`。`xhigh`/`max` 等は 400。未指定時はフィールド自体を送信しない(非対応モデル対策) |
+| `reasoning_effort` | ○ | リクエスト明示値 > `Models[].ReasoningEffort`。対応値: `none`/`minimal`/`low`/`medium`/`high`。`xhigh`/`max` 等は 400。どちらも無ければフィールド自体を送信しない(非対応モデル対策) |
 | `stop` | ○ | |
 | `response_format` | △ | 未対応(TODO) |
 | メッセージ内 `image_url` | ○ | 8章マルチモーダル |
@@ -224,6 +224,7 @@ Chat の新モデル追加時も常に `GenericChatRequest` を使うため、�
 | ツール結果(画像) | tool role に画像不可 → 別途 `role:"user"` で画像 | 同様に `UserMessage` に分割 | `ToOciMessages` で `ToolMessage(テキスト部)` + `UserMessage(画像部)` を `yield return` で分割出力 |
 | 複数ツール呼び出し | 配列で複数返る | 同様に配列 | `ToolCalls` リストをループ変換 |
 | assistant 往復時 | `role:"assistant"` + `tool_calls` | `AssistantMessage{Content, ToolCalls}` | `ToOciMessages` で `ToolCalls` を保持(欠落時 OCI が `Invalid parameter 'toolCallId'` を返す) |
+| 複数 tool 結果の順序 | assistant.`tool_calls` の並びと、続く `role:"tool"` の並びが一致しないことがある | OCI は直前 `toolCalls` と同じ順・連続を要求。不一致は `Invalid parameter: 'toolCallId' ... not found in 'toolCalls' of previous message` (400) | `OpenAIToOciConverter.OrderToolResults`。変換前に、各 assistant の直後に連続する tool 結果を `tool_calls` の順へ並べ替える。一致しない ID は捨てず末尾に残す。tool 以外が挟まったら並べ替えを打ち切る |
 
 ---
 
@@ -299,7 +300,7 @@ OCI 側エラー(401/403/429/5xx)は基本的に透過せず `502 + OCI例外メ
 |---|---|---|
 | OCI 認証プロファイル配列 | `OciAuthProfiles[].{Id, OciConfigProfile, OciCompartmentId}` | `appsettings.json` `OpenAI2Oci` セクション(15.3節) |
 | プロキシ公開用APIキー | `""`(認証なし) / `"sk-..."` | `appsettings.json`(`OpenAI2Oci:ProxyApiKey`)。本番では環境変数 / `dotnet user-secrets` で上書き推奨 |
-| 対応モデル一覧 | `Models[].{Id, AuthProfileId, MaxTokens, Temperature, TopP, TopK}` | `appsettings.json`(`OpenAI2Oci:Models`)。各エントリは `OciAuthProfiles` の `Id` を参照 |
+| 対応モデル一覧 | `Models[].{Id, OciModelId, AuthProfileId, MaxTokens, Temperature, TopP, TopK, ReasoningEffort}` | `Id` は公開ID。`OciModelId` は任意で、空なら `Id` を OCI へ要求する。`ReasoningEffort` も任意で、リクエスト明示値を優先 |
 | Embedding モデル一覧 | `EmbeddingModels[].{Id, AuthProfileId}` | `appsettings.json`(`OpenAI2Oci:EmbeddingModels`)。Cohere Embed v4 用。`Models` とは分離管理 |
 | Kestrel バインド URL | `http://127.0.0.1:11434` | `appsettings.json` `Kestrel.Endpoints.Http.Url` |
 | ログレベル | `Information` | `appsettings.json` `Logging.LogLevel` |
@@ -417,6 +418,24 @@ openai2oci/
     ],
     "Models": [
       {
+        "Id": "xai.grok-4.7 high",
+        "OciModelId": "xai.grok-4.7",
+        "AuthProfileId": "defaultus",
+        "MaxTokens": 131000,
+        "Temperature": 0.3,
+        "TopP": 1,
+        "TopK": 1,
+        "ReasoningEffort": "high"
+      },
+      {
+        "Id": "xai.grok-4.7",
+        "AuthProfileId": "defaultus",
+        "MaxTokens": 131000,
+        "Temperature": 0.3,
+        "TopP": 1,
+        "TopK": 1,
+      },
+      {
         "Id": "google.gemini-2.5-pro",
         "AuthProfileId": "defaultjp",
         "MaxTokens": 65535,
@@ -431,6 +450,16 @@ openai2oci/
         "Temperature": 0.3,
         "TopP": 1,
         "TopK": 1
+      },
+      {
+        "Id": "xai.grok-4.3-low",
+        "OciModelId": "xai.grok-4.3",
+        "AuthProfileId": "defaultus",
+        "MaxTokens": 131000,
+        "Temperature": 0.3,
+        "TopP": 1,
+        "TopK": 1,
+        "ReasoningEffort": "low"
       },
       {
         "Id": "openai.gpt-oss-120b",
@@ -480,17 +509,22 @@ OpenAI プロトコルは `tool_call_id` / `tool_calls` のような snake_case 
 | 2026-09-06 | Embedding 対応: `POST /v1/embeddings` (Cohere Embed v4) 動作確認。`curl /v1/embeddings` で float 配列・base64・batch・dimensions(1024) を確認。`GET /v1/models` に `cohere.embed-v4.0` が含まれることを確認 |
 | 2026-10-12 | 真のトークンストリーミング対応: `ChatStreamAsync` (REST 直叩き) 実装。`curl -N ... stream:true` でトークン逐次受信を確認(`openai.gpt-oss-120b`)。OCI イベント実形は素の Choice `{index, message, pad}` のため両形状対応。SDK 148.1.0 へ更新 |
 | 2026-10-12 | `reasoning_effort` 透過対応: 明示指定時のみ OCI `reasoningEffort` に透過(stream/非stream両対応)。`xai.grok-4.3` で `low` 透過を実機確認(completion_tokens 408→523)。`xhigh` は 400 |
+| 2026-10-23 | tool 結果の順序整合: `xai.grok-4.7` で複数 tool の応答順が要求順と違うと OCI が `toolCallId ... not found in toolCalls of previous message` (400) を返すことを確認。`OrderToolResults` で OCI 送信前に要求順へ並べ替える。対応しない tool 結果は削除しない。大量 ToolCall で再発しないことを確認 |
+| 2026-10-23 | モデル既定 `reasoning_effort`: `Models[].ReasoningEffort` を追加。クライアント未指定時だけ適用し、明示値は上書きしない。非対応モデルは空のまま送らない |
+| 2026-10-23 | 公開IDとOCIモデルIDの分離: `Models[].OciModelId`。`Id` はクライアント向け、OCI 要求は `OciModelId`(空なら `Id`)。同じモデルを effort 違いの別名で公開できる。サンプルは `xai.grok-4.3-low` |
 
 ### 15.6 既知の制約 / 残 TODO
 
 - **トークン単位ストリーミング**: 実装済(`ChatStreamAsync`, 2026-10-12)。`tool_calls` 引数は分割送出せず完了後に一括送出する。
-- **`reasoning_effort` 透過**: 実装済(2026-10-12)。明示指定時のみ OCI `reasoningEffort`(`NONE`/`MINIMAL`/`LOW`/`MEDIUM`/`HIGH`)に透過。`new` 隠しプロパティには基底の `StringEnumConverter` が引き継がれないため明示付与が必須(数値シリアル化されると OCI が `Please pass in correct format of request.` で拒否)。クライアント側の送出 UI が無い場合あり(ChatBox カスタムプロバイダでは未対応のため curl で検証)。
+- **`reasoning_effort` 透過**: 実装済(2026-10-12、既定値は 2026-10-23)。リクエスト明示値 > `Models[].ReasoningEffort` > 未送信。値は `NONE`/`MINIMAL`/`LOW`/`MEDIUM`/`HIGH`。`new` 隠しプロパティには基底の `StringEnumConverter` が引き継がれないため明示付与が必須(数値シリアル化されると OCI が `Please pass in correct format of request.` で拒否)。クライアントが送れない場合はモデル設定で穴埋めする。非対応モデルには設定しない。
+- **公開IDとOCIモデルID**: 実装済(`Models[].OciModelId`, 2026-10-23)。`Id` を別名にしても OCI 要求 ID は `OciModelId` のまま。応答の `model` は公開IDを返す。空なら従来どおり `Id` を OCI へ要求する。
 - **`tool_choice` パラメータ**: 受信するが OCI には渡していない（OCI 既定動作）。
 - **`usage` 統計**: Chat 非stream は実装済(`GenericChatResponse.Usage`→OpenAI形式)。Chat stream は OCI が `isIncludeUsage` 応答を返した場合のみ最終チャンクに付与。Embedding は OCI `EmbedTextResult` がトークン数を返さないため `0` 埋め。
 - **`response_format`**: JSON Schema 構造化出力、未対応。
 - **マルチモーダル入力**: 実装済（`OpenAIToOciConverter.ToOciContents`）。`image_url`(base64/URL + `detail`) → OCI `ImageContent{ImageUrl}` に変換。opencode 側で `attachment: true` + `modalities.input: ["text","image"]` を宣言したモデルでのみ画像添付 UI が有効化される。
 - **マルチモーダル tool 結果**: 設計書 6章の「tool role ではなく user に画像分割」実装済（`ToOciMessages` で ToolMessage(text) + UserMessage(images) に分割）。
 - **OCI ToolCallId 欠落時 GUID 補完**: 実装済(`OciToOpenAIConverter.ConvertToolCalls`)。クライアントが echo-back する ID と一致するため、ToolMessage 変換時に同 ID がそのまま使われる。
+- **tool 結果の順序**: 実装済(`OrderToolResults`, 2026-10-23)。Grok は ID が揃っていても `toolCalls` と続く tool 結果の順が違うと 400 を返す。一致しない ID の削除はしない(順序不一致が原因であり、削除は別の不整合を隠すため)。
 - **Gemini Vertex AI 対応**: `OpenAIToOciConverter` で JSON Schema サニタイズ（`UnsupportedSchemaKeywords`: `$schema`/`exclusiveMinimum` 等22キーワード除去）+ `EnsureTypeField` によるtype自動補完（properties→object / items→array / その他→string）。MCPツール由来のtype省略スキーマ対策。
 - **tool結果が画像のみの場合**: `ToOciMessages` で空TextContentを補完（OCI側の必須項目対策）。
 - **finish_reasonマッピング**: `OciToOpenAIConverter.MapFinishReason` で STOP→stop, LENGTH→length, CONTENT_FILTER→content_filter に正規化。

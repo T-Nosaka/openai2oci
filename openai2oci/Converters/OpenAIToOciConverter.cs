@@ -343,7 +343,8 @@ private static void SanitizeSchemaForOci(JObject schema)
     /// <summary>
     /// OpenAI の reasoning_effort → OCI の ReasoningEffortEnum。
     /// 未指定(null/空文字)は null を返し、OCI へはフィールド自体を送信しない
-    /// (非対応モデルが存在自体を拒否する可能性があるため。呼び出し側の責任で明示指定時のみ透過)。
+    /// (非対応モデルが存在自体を拒否する可能性があるため)。
+    /// 呼び出し側はリクエスト明示値を優先し、無ければ Models[].ReasoningEffort を渡す。
     /// OCI が対応するのは NONE/MINIMAL/LOW/MEDIUM/HIGH のみ。xhigh/max 等は 400 扱い。
     /// </summary>
     public static GenericChatRequest.ReasoningEffortEnum? ToOciReasoningEffort(string? reasoningEffort)

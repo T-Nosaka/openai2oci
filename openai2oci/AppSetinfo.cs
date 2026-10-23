@@ -62,8 +62,21 @@ public class OciAuthProfile
 /// </summary>
 public class ModelSetting
 {
-    /// <summary>OCIモデルID(例: "openai.gpt-oss-120b")</summary>
+    /// <summary>
+    /// クライアントに見せるモデルID。/v1/models と chat 応答の model に使う。
+    /// リクエストの model もこれと完全一致させる。
+    /// </summary>
     public string Id { get; set; } = "";
+
+    /// <summary>
+    /// OCI へ要求するモデルID。空なら Id を使う。
+    /// 同じ OCI モデルを reasoning_effort 違いで複数公開するときに、Id だけ別名にする。
+    /// </summary>
+    public string? OciModelId { get; set; }
+
+    /// <summary>OCI へ渡すモデルID。OciModelId が空なら Id。</summary>
+    public string ResolveOciModelId() =>
+        string.IsNullOrWhiteSpace(OciModelId) ? Id : OciModelId;
 
     /// <summary>使用するOCI認証プロファイルのID(AppSetinfo.OciAuthProfiles[].Id を参照)</summary>
     public string AuthProfileId { get; set; } = "";
@@ -79,6 +92,13 @@ public class ModelSetting
 
     /// <summary>既定のtop_k(OpenAI標準には無いためリクエスト拡張フィールドが優先されない限りこれを使用)</summary>
     public int? TopK { get; set; } = 1;
+
+    /// <summary>
+    /// クライアントが reasoning_effort を送らなかったときの既定値。
+    /// none/minimal/low/medium/high。空なら OCI へ送らない(非対応モデル対策)。
+    /// リクエストで明示指定があればそちらを優先する。
+    /// </summary>
+    public string? ReasoningEffort { get; set; }
 }
 
 /// <summary>

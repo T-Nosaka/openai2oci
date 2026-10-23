@@ -228,6 +228,7 @@ public class OCIAIChatEngine
     public async Task ChatStreamAsync(
         string authProfileId,
         string modelId,
+        string? displayModelId,
         List<Message> messages,
         int maxTokens,
         double temperature,
@@ -278,7 +279,7 @@ public class OCIAIChatEngine
         var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         // role チャンク(先頭)
-        await WriteStreamChunk(response, id, created, modelId, delta: new { role = "assistant" }, finishReason: null, usage: null);
+        await WriteStreamChunk(response, id, created, displayModelId ?? modelId, delta: new { role = "assistant" }, finishReason: null, usage: null);
 
         var sentText = new StringBuilder();
         var toolAcc = new List<ToolCallAcc>();
@@ -329,7 +330,7 @@ public class OCIAIChatEngine
             if (!string.IsNullOrEmpty(delta))
             {
                 deltaCount++;
-                await WriteStreamChunk(response, id, created, modelId, delta: new { content = delta }, finishReason: null, usage: null);
+                await WriteStreamChunk(response, id, created, displayModelId ?? modelId, delta: new { content = delta }, finishReason: null, usage: null);
             }
         }
 
@@ -343,7 +344,7 @@ public class OCIAIChatEngine
             var fallback = ExtractStreamDelta(rawDump.ToString(), sentText, messages, toolAcc, ref lastFinishReason, ref lastUsage);
             if (!string.IsNullOrEmpty(fallback))
             {
-                await WriteStreamChunk(response, id, created, modelId, delta: new { content = fallback }, finishReason: null, usage: null);
+                await WriteStreamChunk(response, id, created, displayModelId ?? modelId, delta: new { content = fallback }, finishReason: null, usage: null);
             }
         }
 
@@ -357,14 +358,14 @@ public class OCIAIChatEngine
                 type = "function",
                 function = new { name = t.Name, arguments = t.Arguments.ToString() }
             }).ToList();
-            await WriteStreamChunk(response, id, created, modelId, delta: new { tool_calls = toolCalls }, finishReason: null, usage: null);
+            await WriteStreamChunk(response, id, created, displayModelId ?? modelId, delta: new { tool_calls = toolCalls }, finishReason: null, usage: null);
         }
 
         var finishReason = toolAcc.Count > 0 ? "tool_calls" : MapStreamFinishReason(lastFinishReason);
         object? usage = lastUsage.HasValue
             ? new { prompt_tokens = lastUsage.Value.prompt, completion_tokens = lastUsage.Value.completion, total_tokens = lastUsage.Value.total }
             : null;
-        await WriteStreamChunk(response, id, created, modelId, delta: new { }, finishReason: finishReason, usage: usage);
+        await WriteStreamChunk(response, id, created, displayModelId ?? modelId, delta: new { }, finishReason: finishReason, usage: usage);
 
         await response.WriteAsync("data: [DONE]\n\n", ct);
         await response.Body.FlushAsync(ct);
